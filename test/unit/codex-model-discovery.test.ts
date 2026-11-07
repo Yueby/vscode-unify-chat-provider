@@ -8,6 +8,7 @@ const network = vi.hoisted(() => ({
   fetch: vi.fn<typeof fetch>(),
   options: [] as unknown[],
   errors: vi.fn<(error: unknown) => void>(),
+  diagnostics: vi.fn<(...args: unknown[]) => void>(),
 }));
 
 vi.mock('vscode', () => {
@@ -113,6 +114,8 @@ beforeEach(() => {
   network.fetch.mockReset();
   network.options.length = 0;
   network.errors.mockReset();
+  network.diagnostics.mockReset();
+  vi.spyOn(console, 'info').mockImplementation(network.diagnostics);
   network.fetch.mockImplementation(async () => catalog());
 });
 afterEach(() => vi.restoreAllMocks());
@@ -133,7 +136,7 @@ describe('authenticated Codex model discovery', () => {
     const url = new URL(input.toString());
     const headers = new Headers(init?.headers);
     expect(url.origin + url.pathname).toBe('https://chatgpt.com/backend-api/codex/models');
-    expect(url.searchParams.get('client_version')).toBe('0.135.0');
+    expect(url.searchParams.get('client_version')).toBe('0.167.0');
     expect(headers.get('user-agent')).toContain(`codex-tui/${url.searchParams.get('client_version')}`);
     expect(headers.get('authorization')).toBe('Bearer expired-token');
     expect(headers.get('chatgpt-account-id')).toBe('account-a');
@@ -167,6 +170,25 @@ describe('authenticated Codex model discovery', () => {
       .toEqual(['account-specific-model']);
   });
 
+  it('logs fixed catalog counts without model contents or authentication identifiers', async () => {
+    network.fetch.mockResolvedValueOnce(catalog([
+      entry({ slug: 'private-model-sentinel', display_name: 'private-display-sentinel' }),
+      entry({ slug: 'hidden-sentinel', visibility: 'hide' }),
+      entry({ slug: 'manual-sentinel', visibility: 'none' }),
+      entry({ slug: 'private-model-sentinel' }),
+    ]));
+    await new OpenAICodexProvider(config).getAvailableModels(credential());
+    expect(network.diagnostics).toHaveBeenCalledOnce();
+    expect(network.diagnostics).toHaveBeenCalledWith(
+      '[UCP Codex catalog] version=0.167.0 total=4 list=2 hide=1 none=1 returned=1',
+    );
+    const output = JSON.stringify(network.diagnostics.mock.calls);
+    for (const value of ['private-model-sentinel', 'private-display-sentinel', 'hidden-sentinel',
+      'manual-sentinel', 'expired-token', 'account-a', 'session-a', BINDING_ID]) {
+      expect(output).not.toContain(value);
+    }
+  });
+
   it('leaves caching to the official-model manager so direct refreshes reach the backend', async () => {
     await new OpenAICodexProvider(config).getAvailableModels(credential());
     await new OpenAICodexProvider(config).getAvailableModels(credential());
@@ -177,6 +199,9 @@ describe('authenticated Codex model discovery', () => {
     'returns an authoritative empty picker list for %j', async ({ models }) => {
       network.fetch.mockResolvedValueOnce(catalog(models));
       await expect(new OpenAICodexProvider(config).getAvailableModels(credential())).resolves.toEqual([]);
+      expect(network.diagnostics).toHaveBeenCalledOnce();
+      expect(network.diagnostics.mock.calls[0][0]).toContain(`total=${models.length}`);
+      expect(network.diagnostics.mock.calls[0][0]).toContain('returned=0');
     },
   );
 
@@ -238,6 +263,7 @@ describe('authenticated Codex model discovery', () => {
   ])('rejects malformed metadata rather than reporting an empty success: %j', async (payload) => {
     network.fetch.mockResolvedValueOnce(Response.json(payload));
     await expect(new OpenAICodexProvider(config).getAvailableModels(credential())).rejects.toThrow('Invalid Codex model catalog');
+    expect(network.diagnostics).not.toHaveBeenCalled();
   });
 });
 
@@ -393,6 +419,7 @@ describe('Codex discovery authentication and cancellation', () => {
       .rejects.toMatchObject({ name: 'AbortError' });
     expect(network.fetch).not.toHaveBeenCalled();
     expect(network.options).toEqual([]);
+    expect(network.diagnostics).not.toHaveBeenCalled();
   });
 
   it('does not publish a catalog canceled while its JSON body is read', async () => {
@@ -403,6 +430,7 @@ describe('Codex discovery authentication and cancellation', () => {
     await expect(new OpenAICodexProvider(config).getAvailableModels(credential(), undefined, controller.signal))
       .rejects.toMatchObject({ name: 'AbortError' });
     expect(network.errors).not.toHaveBeenCalled();
+    expect(network.diagnostics).not.toHaveBeenCalled();
   });
 
   it('does not make a second request after cancellation during credential refresh', async () => {
@@ -451,9 +479,11 @@ describe('Codex discovery and request integration', () => {
 
   it('preserves a discovered max preset in the actual Codex request and leaves output limits to the backend', async () => {
     let sent: unknown;
+    let generationAgent: string | null = null;
     network.fetch.mockImplementation(async (_input, init) => {
       if (init?.method === 'GET') return catalog();
       if (typeof init?.body !== 'string') throw new Error('Expected JSON request');
+      generationAgent = new Headers(init.headers).get('user-agent');
       sent = JSON.parse(init.body);
       return Response.json({ error: { message: 'request-captured' } }, { status: 400 });
     });
@@ -472,6 +502,8 @@ describe('Codex discovery and request integration', () => {
       )) { void part; }
     }).rejects.toThrow('request-captured');
     expect(sent).toMatchObject({ model: 'account-specific-model', reasoning: { effort: 'max' }, store: false });
+    expect(generationAgent).toContain('codex-tui/0.135.0');
+    expect(generationAgent).not.toContain('0.167.0');
     expect(sent).not.toHaveProperty('max_output_tokens');
     expect(sent).not.toHaveProperty('max_completion_tokens');
   });

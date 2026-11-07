@@ -21,12 +21,17 @@ import { codexBaseInstructionsForModel } from './codex-instructions';
 import { parseCodexModelCatalog } from './codex-model-catalog';
 
 const CODEX_CLIENT_VERSION = '0.135.0';
+// Keep catalog discovery on a current client compatibility profile.
+// https://github.com/openai/codex/releases/tag/rust-v0.167.0
+const CODEX_MODEL_DISCOVERY_VERSION = '0.167.0';
 const CODEX_API_ENDPOINT = 'https://chatgpt.com/backend-api/codex/responses';
 const CODEX_MODELS_ENDPOINT =
-  `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`;
-// Align with CLIProxyAPI internal/runtime/executor/codex_executor.go defaults.
-const CODEX_USER_AGENT =
-  `codex-tui/${CODEX_CLIENT_VERSION} (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; ${CODEX_CLIENT_VERSION})`;
+  `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_MODEL_DISCOVERY_VERSION}`;
+function codexUserAgent(version: string): string {
+  return `codex-tui/${version} (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; ${version})`;
+}
+// Align generation with CLIProxyAPI's existing response profile.
+const CODEX_USER_AGENT = codexUserAgent(CODEX_CLIENT_VERSION);
 const CODEX_ORIGINATOR = 'codex-tui';
 // Align with CLIProxyAPI codex_websockets_executor.go.
 const CODEX_RESPONSES_WEBSOCKET_BETA = 'responses_websockets=2026-02-06';
@@ -518,6 +523,7 @@ export class OpenAICodexProvider extends OpenAIResponsesProvider {
       deleteHeaderVariants(headers, 'authorization');
       headers['Authorization'] = `Bearer ${codexModelToken(current)}`;
       headers['Accept'] = 'application/json';
+      headers['User-Agent'] = codexUserAgent(CODEX_MODEL_DISCOVERY_VERSION);
       const response = await fetchWithNetwork(CODEX_MODELS_ENDPOINT, {
         method: 'GET', headers: sanitizeCodexHeaders(headers), signal, redirect: 'error',
       });
@@ -554,6 +560,14 @@ export class OpenAICodexProvider extends OpenAIResponsesProvider {
       verifyContext(current);
       const models = parseCodexModelCatalog(raw);
       signal?.throwIfAborted();
+      verifyContext(current);
+      const entries = isRecord(raw) && Array.isArray(raw['models']) ? raw['models'] : [];
+      const count = (visibility: string): number => entries.filter(
+        (entry) => isRecord(entry) && entry['visibility'] === visibility,
+      ).length;
+      // Only protocol version and counts: never log catalog contents or auth identity.
+      console.info(`[UCP Codex catalog] version=${CODEX_MODEL_DISCOVERY_VERSION} total=${entries.length} ` +
+        `list=${count('list')} hide=${count('hide')} none=${count('none')} returned=${models.length}`);
       return models;
     } catch (error) {
       signal?.throwIfAborted();

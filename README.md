@@ -1091,7 +1091,7 @@ The models listed below support [One-Click Add Models](#one-click-add-models), a
 - MiniMax M3.1 Flash and the new Kimi configurations use a 131,072-token output budget. New Kimi Coding presets fit a 262,144-token window; larger windows and Highspeed availability depend on your plan. Higher-tier users can adjust their budgets while reserving output space.
 - Gemini 4 Argon defaults to 65,536 output tokens on AI Studio. Its 32,768-token Vertex AI budget fits both streaming and non-streaming requests.
 - Use the default OpenAI Responses format for GPT tools. Official Chat Completions configurations declare tools unavailable with these reasoning presets; selecting `none` on Sol/Luna does not change the static tool declaration.
-- Codex OAuth discovers visible models from the signed-in account catalog. Prompt budgets follow its effective context window with at least 5% headroom; generation limits remain backend-controlled. Directory requests use the same protocol version as the Codex User-Agent.
+- Codex OAuth discovers visible models from the signed-in account catalog. Prompt budgets follow its effective context window with at least 5% headroom; generation limits remain backend-controlled. Catalog queries keep their version parameter aligned with the discovery User-Agent profile.
 - Codex discovery reuses the official-model cache and force-refresh mechanism. Failed refreshes retain the last successful catalog and record an error; a successful empty catalog replaces the old list. Signing out or switching authentication context invalidates that provider's cache.
 
 > Tip
