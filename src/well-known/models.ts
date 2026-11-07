@@ -2446,7 +2446,8 @@ const _WELL_KNOWN_MODELS = [
     id: 'deepseek-flash',
     overrides: ['deepseek-v4.1-flash', 'deepseek-ai/DeepSeek-V4.1-Flash'],
     name: 'DeepSeek V4.1 Flash',
-    maxInputTokens: 1000000,
+    // Reserve the configured output within the published decimal 1M API window.
+    maxInputTokens: 1000000 - 393216,
     maxOutputTokens: 393216,
     stream: true,
     tokenizer: 'deepseek',
