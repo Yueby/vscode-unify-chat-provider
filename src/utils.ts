@@ -3161,7 +3161,8 @@ export async function getAllModelsForProvider(
  * - Always returns user-defined models immediately
  * - If autoFetchOfficialModels is enabled:
  *   - Returns cached official models if available
- *   - Returns placeholder model if no cache exists
+ *   - Returns placeholder model only if initial fetch has not completed
+ *   - Keeps completed empty/error results during background refresh
  *   - Automatically triggers background fetch when needed
  */
 export function getAllModelsForProviderSync(
@@ -3180,14 +3181,24 @@ export function getAllModelsForProviderSync(
       // Cache exists - use it
       officialModels = state.models;
     } else {
-      // No cache - return placeholder
-      officialModels = [
-        {
-          id: PLACEHOLDER_MODEL_ID,
-          name: t('Loading official models...'),
-          capabilities: { toolCalling: true, imageInput: true },
-        },
-      ];
+      const hasCompleted = Boolean(
+        state &&
+          (state.lastFetchTime > 0 ||
+            (state.lastAttemptTime !== undefined && state.lastAttemptTime > 0) ||
+            (state.lastErrorTime !== undefined && state.lastErrorTime > 0) ||
+            typeof state.lastError === 'string'),
+      );
+
+      if (!hasCompleted) {
+        // Initial fetch has not completed yet - return placeholder
+        officialModels = [
+          {
+            id: PLACEHOLDER_MODEL_ID,
+            name: t('Loading official models...'),
+            capabilities: { toolCalling: true, imageInput: true },
+          },
+        ];
+      }
     }
 
     // Trigger background fetch (non-blocking)
