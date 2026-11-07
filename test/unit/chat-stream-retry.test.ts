@@ -1,6 +1,11 @@
+import { APIError } from 'openai';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('vscode', () => ({}));
+vi.mock('vscode', () => ({
+  workspace: {
+    getConfiguration: () => ({ get: () => undefined }),
+  },
+}));
 
 vi.mock('../../src/i18n', () => ({
   t: (message: string, ...args: readonly unknown[]) =>
@@ -15,6 +20,7 @@ vi.mock('../../src/official-models-manager', () => ({
 }));
 
 import {
+  fetchWithRetryUsingFetch,
   isRetryableStreamReadError,
   RetryableStreamReadError,
   shouldRetryStreamReadError,
@@ -139,6 +145,84 @@ describe('chat stream retry classification', () => {
     ).toBe(true);
   });
 
+  it.each([
+    { error: { code: 'upstream_http2_stream_error', message: 'HTTP/2 stream failed' } },
+    { error: { message: 'upstream stream returned an error payload' } },
+    { error: { message: 'upstream service temporarily unavailable' } },
+    { error: { message: 'stream closed before response.completed' } },
+  ])('recognizes an explicit gateway stream error: %j', (error) => {
+    expect(isRetryableStreamReadError(error)).toBe(true);
+  });
+
+  it('recognizes a gateway stream code on an Error instance', () => {
+    expect(isRetryableStreamReadError(
+      new CodedError('HTTP/2 stream failed', 'upstream_http2_stream_error'),
+    )).toBe(true);
+  });
+
+  it('does not retry an upstream error type without a transient stream signal', () => {
+    expect(isRetryableStreamReadError({
+      error: { type: 'upstream_error', message: 'invalid provider configuration' },
+    })).toBe(false);
+  });
+
+  it.each([400, 401, 408, 429, 500, 502, 503, 504, 599])(
+    'leaves HTTP %i failures to the HTTP retry layer',
+    (status) => {
+      const error = Object.assign(new Error('stream_read_error'), { status });
+      expect(isRetryableStreamReadError(error)).toBe(false);
+      expect(isRetryableStreamReadError({ error: { status, code: 'stream_read_error' } })).toBe(false);
+    },
+  );
+
+  it.each([
+    new Error('stream_read_error', {
+      cause: Object.assign(new Error('HTTP failure'), { status: 502 }),
+    }),
+    Object.assign(new Error('HTTP failure', {
+      cause: new CodedError('stream failed', 'stream_read_error'),
+    }), { status: 502 }),
+    new RetryableStreamReadError(Object.assign(new Error('HTTP failure'), { status: 502 })),
+    Object.assign(new Error('stream_read_error', {
+      cause: Object.assign(new Error('HTTP failure'), { status: 502 }),
+    }), { source: 'stream' }),
+    new Error('stream_read_error', {
+      cause: { error: { status: 502, message: 'HTTP failure' } },
+    }),
+  ])('does not let wrappers mask an HTTP failure: %j', (error) => {
+    expect(isRetryableStreamReadError(error)).toBe(false);
+  });
+
+  it('allows an explicitly identified stream failure to carry an HTTP status', () => {
+    const streamError = Object.assign(new CodedError('stream failed', 'stream_read_error'), {
+      status: 502,
+      source: 'stream',
+    });
+    expect(isRetryableStreamReadError(new Error('wrapped stream error', { cause: streamError }))).toBe(true);
+    expect(isRetryableStreamReadError({ error: streamError })).toBe(true);
+    expect(isRetryableStreamReadError({
+      source: 'stream', status: 502, type: 'upstream_error', message: 'invalid provider configuration',
+    })).toBe(false);
+  });
+
+  it('checks HTTP status on its own error node rather than inheriting the stream source', () => {
+    expect(isRetryableStreamReadError({
+      source: 'stream', code: 'stream_read_error', error: { status: 502 },
+    })).toBe(false);
+  });
+
+  it('terminates on a cyclic cause chain', () => {
+    const error = new CodedError('stream failed', 'upstream_http2_stream_error');
+    Object.assign(error, { cause: error });
+    expect(isRetryableStreamReadError(error)).toBe(true);
+  });
+
+  it('does not retry an aborted gateway stream', () => {
+    const error = new Error('upstream service temporarily unavailable');
+    error.name = 'AbortError';
+    expect(isRetryableStreamReadError(error)).toBe(false);
+  });
+
   it('does not treat an unmarked fetch-stage network error as a stream error', () => {
     expect(
       isRetryableStreamReadError(
@@ -166,6 +250,44 @@ describe('chat stream retry classification', () => {
 });
 
 describe('chat stream retry policy', () => {
+  it('does not restart an exhausted HTTP retry budget at the service boundary', async () => {
+    const maxRetries = 2;
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      error: {
+        type: 'upstream_error',
+        message: 'upstream service temporarily unavailable: stream_read_error',
+      },
+    }), { status: 502, headers: { 'Content-Type': 'application/json' } }));
+
+    for (let retryAttempt = 0; ; retryAttempt++) {
+      const response = await fetchWithRetryUsingFetch(fetcher, 'https://example.test/responses', {
+        proxy: { type: 'direct' },
+        retryConfig: {
+          maxRetries,
+          initialDelayMs: 0,
+          maxDelayMs: 0,
+          jitterFactor: 0,
+        },
+      });
+      const payload: unknown = await response.json();
+      if (typeof payload !== 'object' || payload === null) {
+        throw new Error('Expected an HTTP error payload');
+      }
+      const error = APIError.generate(response.status, payload, undefined, response.headers);
+      expect(error).toMatchObject({ status: 502, type: 'upstream_error' });
+      if (!shouldRetryStreamReadError(error, {
+        emittedPartCount: 0,
+        cancellationRequested: false,
+        retryAttempt,
+        maxRetries,
+      })) {
+        break;
+      }
+    }
+
+    expect(fetcher).toHaveBeenCalledTimes(maxRetries + 1);
+  });
+
   const retryableError = new RetryableStreamReadError(
     new Error('transient stream failure'),
   );

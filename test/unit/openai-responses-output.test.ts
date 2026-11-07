@@ -288,6 +288,44 @@ function textValues(
 }
 
 describe('OpenAI Responses output parsing', () => {
+  it('preserves the stream source on an error event carrying an upstream HTTP status', async () => {
+    const event = Object.assign({
+      type: 'error' as const,
+      code: 'upstream_http2_stream_error',
+      message: 'upstream service temporarily unavailable',
+      param: null,
+      sequence_number: 1,
+    }, { status: 502 });
+
+    await expect(collectParts(provider.parseStreamForTest([event], createTrace())))
+      .rejects.toMatchObject({
+        name: 'OpenAIResponsesRequestError',
+        source: 'stream',
+        status: 502,
+        code: 'upstream_http2_stream_error',
+      });
+  });
+
+  it('preserves the stream source on a failed response carrying an upstream HTTP status', async () => {
+    const response = createResponse([]);
+    response.status = 'failed';
+    response.error = Object.assign({
+      code: 'server_error' as const,
+      message: 'upstream service temporarily unavailable',
+    }, { status: 502 });
+
+    await expect(collectParts(provider.parseStreamForTest([{
+      type: 'response.failed',
+      response,
+      sequence_number: 1,
+    }], createTrace()))).rejects.toMatchObject({
+      name: 'OpenAIResponsesRequestError',
+      source: 'stream',
+      status: 502,
+      code: 'server_error',
+    });
+  });
+
   it('emits only the missing suffix from a final text event', async () => {
     const message = createMessage('hello');
     const parts = await collectParts(

@@ -987,6 +987,7 @@ export function isRetryableNetworkError(
 
 const RETRYABLE_STREAM_READ_ERROR_CODES = new Set([
   'stream_read_error',
+  'upstream_http2_stream_error',
 ]);
 
 export class RetryableStreamReadError extends Error {
@@ -1028,18 +1029,43 @@ function getRetryableStreamReadErrorFields(error: unknown): {
   };
 }
 
+function isHttpResponseFailure(error: unknown): boolean {
+  return (
+    isRecord(error) &&
+    error['source'] !== 'stream' &&
+    typeof error['status'] === 'number' &&
+    error['status'] >= 400 &&
+    error['status'] < 600
+  );
+}
+
 export function isRetryableStreamReadError(error: unknown): boolean {
   const seen = new Set<unknown>();
   let current: unknown = error;
+  let markedStreamReadError = false;
 
   while (current !== undefined && !seen.has(current)) {
     seen.add(current);
 
+    // HTTP failures already pass through the fetch retry budget. A wrapper or
+    // gateway message must not restart that budget at the service boundary.
+    // Stream events may carry their own upstream status after a successful HTTP
+    // response, so only their explicit source bypasses this HTTP-stage guard.
+    if (
+      isHttpResponseFailure(current) ||
+      (isRecord(current) && isHttpResponseFailure(current['error']))
+    ) {
+      return false;
+    }
     if (current instanceof RetryableStreamReadError) {
-      return true;
+      markedStreamReadError = true;
     }
 
     current = getErrorCause(current);
+  }
+
+  if (markedStreamReadError) {
+    return true;
   }
 
   if (isAbortLikeError(error)) {
@@ -1068,6 +1094,9 @@ export function isRetryableStreamReadError(error: unknown): boolean {
         normalizedMessage.includes("stream_read_error") ||
         normalizedMessage.includes("stream read error") ||
         normalizedMessage.includes("servers are currently overloaded") ||
+        normalizedMessage.includes("upstream stream returned an error payload") ||
+        normalizedMessage.includes("upstream service temporarily unavailable") ||
+        normalizedMessage.includes("closed before response.completed") ||
         isInternalStreamError
       ) {
         return true;
