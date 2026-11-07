@@ -530,6 +530,18 @@ function buildXaiRequest(
   };
 }
 
+function googleToolParameters(tool: vscode.LanguageModelChatTool): Record<string, unknown> {
+  if (tool.inputSchema === undefined) {
+    return { type: 'object', properties: {} };
+  }
+  const schema = recordValue(tool.inputSchema);
+  if (!schema || (schema['type'] !== undefined && schema['type'] !== 'object')) {
+    throw new Error(`Zed Gemini tool "${tool.name}" parameters must describe an object.`);
+  }
+  // Function arguments are objects; keep nested JSON Schema semantics intact.
+  return { ...schema, type: 'object' };
+}
+
 function buildGoogleRequest(
   model: ModelConfig,
   messages: NormalizedMessage[],
@@ -590,7 +602,7 @@ function buildGoogleRequest(
       });
     }
   }
-  const baseModelId = getBaseModelId(model.id);
+  const baseModelId = getBaseModelId(model.id).replace(/^models\//, '');
   const thinkingConfig = googleThinkingConfig(baseModelId, model);
   return {
     model: `models/${baseModelId}`,
@@ -610,10 +622,7 @@ function buildGoogleRequest(
               functionDeclarations: options.tools.map((tool) => ({
                 name: tool.name,
                 description: tool.description,
-                parameters: tool.inputSchema ?? {
-                  type: 'object',
-                  properties: {},
-                },
+                parametersJsonSchema: googleToolParameters(tool),
               })),
             },
           ],
@@ -634,44 +643,50 @@ function googleThinkingConfig(
   modelId: string,
   model: ModelConfig,
 ): Record<string, unknown> | undefined {
-  const supportsThinking =
-    modelId.startsWith('gemini-2.5-') || modelId.startsWith('gemini-3');
-  if (!supportsThinking) return undefined;
-
-  if (thinkingIsAllowed(model)) {
-    const effort = model.thinking?.effort?.toLowerCase();
-    const thinkingLevel =
-      effort === 'minimal' ||
-      effort === 'low' ||
-      effort === 'medium' ||
-      effort === 'high'
-        ? effort.toUpperCase()
-        : undefined;
+  const isPro25 = /^gemini-2\.5-pro(?:-|$)/.test(modelId);
+  const isFlash25 = /^gemini-2\.5-flash(?:-|$)/.test(modelId);
+  if (isPro25 || isFlash25) {
+    const budget = model.thinking?.budgetTokens;
+    if (budget !== undefined && (!Number.isInteger(budget) || budget < -1)) {
+      throw new Error('Zed Gemini thinking budget must be -1 or a nonnegative integer.');
+    }
+    if (!thinkingIsAllowed(model) || budget === 0) {
+      // Pro cannot disable thinking; keep its unconfigured server default distinct.
+      if (isPro25 && model.thinking === undefined) return undefined;
+      return { thinkingBudget: isPro25 ? 128 : 0 };
+    }
+    const minimum = isPro25
+      ? 128
+      : /^gemini-2\.5-flash-lite(?:-|$)/.test(modelId) ? 512 : 0;
+    const maximum = isPro25 ? 32768 : 24576;
     return {
       includeThoughts: true,
-      ...(thinkingLevel ? { thinkingLevel } : {}),
+      thinkingBudget: budget === undefined || budget === -1
+        ? -1
+        : Math.min(maximum, Math.max(minimum, budget)),
     };
   }
 
-  if (modelId.startsWith('gemini-3')) {
-    return {
-      thinkingLevel:
-        modelId.includes('-pro') ? 'LOW' : 'MINIMAL',
-    };
+  const isArgon = /^gemini-4-argon(?:-|$)/.test(modelId);
+  if (!modelId.startsWith('gemini-3') && !isArgon) return undefined;
+  const supportsMinimal = !modelId.includes('-pro') &&
+    !modelId.startsWith('gemini-3.8-') && !isArgon;
+  if (!thinkingIsAllowed(model) || model.thinking?.budgetTokens === 0) {
+    return { thinkingLevel: supportsMinimal ? 'MINIMAL' : 'LOW' };
   }
-  if (
-    new Set([
-      'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      'gemini-2.5-flash-preview-latest',
-      'gemini-2.5-flash-preview-04-17',
-      'gemini-2.5-flash-preview-05-20',
-      'gemini-2.5-flash-lite-preview-06-17',
-    ]).has(modelId)
-  ) {
-    return { thinkingBudget: 0 };
-  }
-  return undefined;
+
+  const effort = model.thinking?.effort?.toLowerCase();
+  const thinkingLevel = effort === 'minimal'
+    ? supportsMinimal ? 'MINIMAL' : 'LOW'
+    : effort === 'max' || effort === 'xhigh'
+      ? 'HIGH'
+      : effort === 'low' || effort === 'medium' || effort === 'high'
+        ? effort.toUpperCase()
+        : undefined;
+  return {
+    includeThoughts: true,
+    ...(thinkingLevel ? { thinkingLevel } : {}),
+  };
 }
 
 export function buildZedProviderRequest(

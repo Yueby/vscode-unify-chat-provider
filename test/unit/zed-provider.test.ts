@@ -288,6 +288,159 @@ beforeEach(() => {
   network.fetcher = async () => new Response('', { status: 500 });
 });
 
+describe('Zed Google request compatibility', () => {
+  const schema = {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    type: 'object',
+    $defs: { 'Name/Value~': { type: 'string', enum: ['first', 'second'] } },
+    properties: {
+      name: { $ref: '#/$defs/Name~1Value~0' },
+      count: { type: 'integer', enum: [1, 2] },
+      choice: { oneOf: [{ const: true }, { const: 3 }] },
+      nullable: { type: ['string', 'integer', 'null'] },
+      pair: { type: 'array', prefixItems: [{ type: 'string' }, { type: 'integer' }], items: false },
+    },
+    allOf: [{ required: ['name'] }, { required: ['count'] }],
+    propertyNames: { pattern: '^[a-z]+$' },
+    additionalProperties: false,
+    'x-mcp-header': 'metadata',
+  };
+
+  function request(
+    id: string,
+    thinking: ModelConfig['thinking'],
+    inputSchema: object | undefined = schema,
+  ): Record<string, unknown> {
+    return buildZedProviderRequest('google', { ...model, id, thinking }, messages(), {
+      ...options(), tools: [{ name: 'lookup', description: 'Lookup', inputSchema }],
+    });
+  }
+
+  it('preserves JSON Schema keywords and parameter types through JSON serialization', () => {
+    const body: unknown = JSON.parse(JSON.stringify(request('gemini-4-argon', undefined)));
+    expect(body).toMatchObject({
+      tools: [{ functionDeclarations: [{ parametersJsonSchema: schema }] }],
+    });
+    expect(body).not.toMatchObject({
+      tools: [{ functionDeclarations: [{ parameters: expect.anything() }] }],
+    });
+    expect(schema.properties.name).toEqual({ $ref: '#/$defs/Name~1Value~0' });
+    expect(schema.properties.count).toEqual({ type: 'integer', enum: [1, 2] });
+  });
+
+  it('adds an object root without mutating an implicit object schema', () => {
+    const implicit = Object.freeze({ properties: { value: { type: 'string' } } });
+    expect(request('gemini-4-argon', undefined, implicit)).toMatchObject({
+      tools: [{ functionDeclarations: [{ parametersJsonSchema: { ...implicit, type: 'object' } }] }],
+    });
+    expect(Object.hasOwn(implicit, 'type')).toBe(false);
+  });
+
+  it('uses an empty object schema when a tool has no parameter declaration', () => {
+    const body = buildZedProviderRequest('google', model, messages(), {
+      ...options(), tools: [{ name: 'no_args', description: 'No arguments' }],
+    });
+    expect(body).toMatchObject({
+      tools: [{ functionDeclarations: [{ parametersJsonSchema: { type: 'object', properties: {} } }] }],
+    });
+  });
+
+  it.each([{ type: 'string' }, { type: 'array' }, { type: ['object', 'null'] }, []])(
+    'rejects a declared non-object parameter root: %j', (inputSchema) => {
+      expect(() => request('gemini-4-argon', undefined, inputSchema)).toThrow(/lookup.*object/);
+    },
+  );
+
+  it.each([
+    { id: 'gemini-2.5-pro', thinking: { type: 'enabled', budgetTokens: 1024 }, expected: { includeThoughts: true, thinkingBudget: 1024 } },
+    { id: 'gemini-2.5-flash', thinking: { type: 'auto', effort: 'high', budgetTokens: 5000 }, expected: { includeThoughts: true, thinkingBudget: 5000 } },
+    { id: 'gemini-2.5-flash-lite', thinking: { type: 'enabled' }, expected: { includeThoughts: true, thinkingBudget: -1 } },
+    { id: 'gemini-2.5-pro', thinking: { type: 'auto' }, expected: { includeThoughts: true, thinkingBudget: -1 } },
+    { id: 'gemini-2.5-pro', thinking: { type: 'enabled', budgetTokens: -1 }, expected: { includeThoughts: true, thinkingBudget: -1 } },
+    { id: 'gemini-2.5-pro', thinking: { type: 'enabled', budgetTokens: 0 }, expected: { thinkingBudget: 128 } },
+    { id: 'gemini-2.5-flash', thinking: { type: 'enabled', budgetTokens: 0 }, expected: { thinkingBudget: 0 } },
+    { id: 'gemini-2.5-flash-lite', thinking: { type: 'enabled', budgetTokens: 1 }, expected: { includeThoughts: true, thinkingBudget: 512 } },
+    { id: 'gemini-2.5-flash', thinking: { type: 'enabled', budgetTokens: 32768 }, expected: { includeThoughts: true, thinkingBudget: 24576 } },
+    { id: 'gemini-2.5-pro', thinking: { type: 'enabled', budgetTokens: 99999 }, expected: { includeThoughts: true, thinkingBudget: 32768 } },
+    { id: 'gemini-2.5-flash', thinking: { type: 'disabled', budgetTokens: 1024 }, expected: { thinkingBudget: 0 } },
+    { id: 'gemini-2.5-pro', thinking: { type: 'disabled' }, expected: { thinkingBudget: 128 } },
+    { id: 'gemini-2.5-flash', thinking: undefined, expected: { thinkingBudget: 0 } },
+  ] satisfies Array<{ id: string; thinking: ModelConfig['thinking']; expected: object }>) (
+    'uses a valid budget for $id with $thinking', ({ id, thinking, expected }) => {
+      expect(request(id, thinking)).toMatchObject({ generationConfig: { thinkingConfig: expected } });
+      expect(JSON.stringify(request(id, thinking))).not.toContain('thinkingLevel');
+    },
+  );
+
+  it.each([-2, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects invalid 2.5 thinking budget %s', (budgetTokens) => {
+      expect(() => request('gemini-2.5-flash', { type: 'enabled', budgetTokens }))
+        .toThrow(/thinking budget/);
+    },
+  );
+
+  it.each([
+    { id: 'gemini-3.5-flash', thinking: { type: 'disabled' }, level: 'MINIMAL', thoughts: false },
+    { id: 'gemini-3.1-pro', thinking: { type: 'enabled', effort: 'minimal' }, level: 'LOW', thoughts: true },
+    { id: 'gemini-3.8-flash', thinking: { type: 'enabled', effort: 'minimal' }, level: 'LOW', thoughts: true },
+    { id: 'gemini-3.8-flash', thinking: { type: 'disabled' }, level: 'LOW', thoughts: false },
+    { id: 'gemini-3.8-flash', thinking: { type: 'enabled', effort: 'max' }, level: 'HIGH', thoughts: true },
+    { id: 'gemini-4-argon', thinking: { type: 'enabled', effort: 'xhigh', budgetTokens: 1024 }, level: 'HIGH', thoughts: true },
+    { id: 'models/gemini-4-argon#custom', thinking: { type: 'enabled', effort: 'low' }, level: 'LOW', thoughts: true },
+    { id: 'gemini-4-argon', thinking: { type: 'disabled' }, level: 'LOW', thoughts: false },
+    { id: 'gemini-4-argon', thinking: { type: 'enabled', budgetTokens: 0 }, level: 'LOW', thoughts: false },
+  ] satisfies Array<{ id: string; thinking: ModelConfig['thinking']; level: string; thoughts: boolean }>) (
+    'uses a supported thinking level for $id with $thinking', ({ id, thinking, level, thoughts }) => {
+      const body = request(id, thinking);
+      expect(body).toMatchObject({
+        generationConfig: { thinkingConfig: { thinkingLevel: level, ...(thoughts ? { includeThoughts: true } : {}) } },
+      });
+      expect(JSON.stringify(body)).not.toContain('thinkingBudget');
+      if (!thoughts) expect(JSON.stringify(body)).not.toContain('includeThoughts');
+      expect(body['model']).not.toContain('models/models/');
+    },
+  );
+
+  it.each(['gemini-2.5-pro', 'gemini-4-unknown'])(
+    'does not invent a thinking configuration for an unconfigured %s', (id) => {
+      expect(request(id, undefined)).not.toMatchObject({
+        generationConfig: { thinkingConfig: expect.anything() },
+      });
+    },
+  );
+
+  it('sends the JSON Schema field through the Zed completion wrapper', async () => {
+    const config = configuredProvider();
+    const credential = zedCredential();
+    rememberZedModelRoutes(config, credential, [{
+      organizationId: 'org', modelId: 'gemini-4-argon', upstreamProvider: 'google',
+    }]);
+    const sent: unknown[] = [];
+    network.fetcher = async (input, init) => {
+      expect(new URL(input.toString()).pathname).toBe('/completions');
+      if (typeof init?.body !== 'string') throw new Error('Expected a serialized Zed request');
+      sent.push(JSON.parse(init.body));
+      return new Response([
+        JSON.stringify({ event: { candidates: [{ content: { role: 'model', parts: [{ text: 'done' }] } }] } }),
+        JSON.stringify({ status: 'stream_ended' }),
+      ].join('\n'), { headers: { 'x-zed-server-supports-status-messages': 'true' } });
+    };
+    const parts = await collect(new ZedProvider(config).streamChat(
+      'encoded', { ...model, id: 'gemini-4-argon', thinking: { type: 'enabled', effort: 'high' } },
+      messages(), { ...options(), tools: [{ name: 'lookup', description: 'Lookup', inputSchema: schema }] },
+      trace(), cancellationToken(), logger().instance, credential,
+    ));
+    expect(parts).toContainEqual(new vscode.LanguageModelTextPart('done'));
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      provider: 'google', model: 'gemini-4-argon', provider_request: {
+        tools: [{ functionDeclarations: [{ parametersJsonSchema: schema }] }],
+        generationConfig: { thinkingConfig: { includeThoughts: true, thinkingLevel: 'HIGH' } },
+      },
+    });
+  });
+});
+
 describe('Zed Chat adapters', () => {
   it('returns the static Zeta model with discovered models and caches routes', async () => {
     network.fetcher = async (input) => {
