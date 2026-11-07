@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import * as vscode from 'vscode';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ModelConfig, ProviderConfig } from '../../src/types';
 
 vi.mock('vscode', () => {
@@ -89,6 +89,9 @@ vi.mock('../../src/logger', () => {
 import { RequestLogger } from '../../src/logger';
 import { createStatefulMarkerIdentity } from '../../src/utils';
 import { OpenAIResponsesProvider } from '../../src/client/openai/responses-client';
+import { webSocketSessionManager } from '../../src/client/websocket-session-manager';
+
+afterEach(() => vi.restoreAllMocks());
 
 const config: ProviderConfig = {
   type: 'openai-responses',
@@ -99,8 +102,24 @@ const config: ProviderConfig = {
 const model: ModelConfig = { id: 'test-model', stream: false };
 const modelId = 'history-test/test-model';
 
+function completedResponse() {
+  return {
+    id: 'resp-test',
+    status: 'completed',
+    output: [{
+      id: 'msg-test', type: 'message', role: 'assistant', status: 'completed',
+      content: [{ type: 'output_text', text: 'done', annotations: [] }],
+    }],
+    usage: null,
+  };
+}
+
 class HistoryTestProvider extends OpenAIResponsesProvider {
   readonly requests: unknown[] = [];
+
+  constructor(configuration: ProviderConfig, private readonly rejectContinuation = false) {
+    super(configuration);
+  }
 
   protected override createClient(): OpenAI {
     return new OpenAI({
@@ -113,20 +132,24 @@ class HistoryTestProvider extends OpenAIResponsesProvider {
         }
         const body: unknown = JSON.parse(init.body);
         this.requests.push(body);
-        return Response.json({
-          id: 'resp-test',
-          status: 'completed',
-          output: [
-            {
-              id: 'msg-test',
-              type: 'message',
-              role: 'assistant',
-              status: 'completed',
-              content: [{ type: 'output_text', text: 'done', annotations: [] }],
-            },
-          ],
-          usage: null,
-        });
+        if (this.rejectContinuation && typeof body === 'object' && body !== null &&
+          'previous_response_id' in body) {
+          return Response.json({ error: {
+            code: 'previous_response_not_found', type: 'invalid_request_error',
+            param: 'previous_response_id', message: 'Previous response not found',
+          } }, { status: 400 });
+        }
+        if (typeof body === 'object' && body !== null && 'input' in body &&
+          Array.isArray(body.input) && body.input.some((item: unknown) =>
+            typeof item === 'object' && item !== null && 'type' in item &&
+            item.type === 'reasoning' && 'status' in item,
+          )) {
+          return Response.json({ error: {
+            code: 'unknown_parameter', type: 'invalid_request_error',
+            param: 'input.status', message: 'Unknown parameter: reasoning status',
+          } }, { status: 400 });
+        }
+        return Response.json(completedResponse());
       },
     });
   }
@@ -187,17 +210,15 @@ function expectedToolInput(round: number): object[] {
 
 function createMarker(
   identity = createStatefulMarkerIdentity(config, model),
+  output: readonly object[] = [{
+    type: 'message', role: 'assistant',
+    content: [{ type: 'output_text', text: 'prior answer', annotations: [] }],
+  }],
 ): vscode.LanguageModelDataPart {
   const envelope = {
     identity,
     data: {
-      data: [
-        {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'output_text', text: 'prior answer', annotations: [] }],
-        },
-      ],
+      data: output,
       sessionId: 'trusted-session',
       responseId: 'resp-trusted',
     },
@@ -208,14 +229,19 @@ function createMarker(
   );
 }
 
-async function send(
+async function sendRequests(
   messages: readonly vscode.LanguageModelChatRequestMessage[],
-): Promise<unknown> {
-  const provider = new HistoryTestProvider(config);
+  settings: {
+    configuration?: ProviderConfig;
+    requestModel?: ModelConfig;
+    rejectContinuation?: boolean;
+  } = {},
+): Promise<unknown[]> {
+  const provider = new HistoryTestProvider(settings.configuration ?? config, settings.rejectContinuation);
   const parts = [];
   for await (const part of provider.streamChat(
     modelId,
-    model,
+    settings.requestModel ?? model,
     messages,
     {
       requestInitiator: 'history-test',
@@ -232,9 +258,159 @@ async function send(
     parts.push(part);
   }
   expect(parts).toContainEqual(new vscode.LanguageModelTextPart('done'));
-  expect(provider.requests).toHaveLength(1);
-  return provider.requests[0];
+  return provider.requests;
 }
+
+async function send(messages: readonly vscode.LanguageModelChatRequestMessage[]): Promise<unknown> {
+  const requests = await sendRequests(messages);
+  expect(requests).toHaveLength(1);
+  return requests[0];
+}
+
+describe('Responses reasoning history compatibility', () => {
+  it.each(['redactedData', 'encrypted_content', 'encrypted'])(
+    'prefers %s ciphertext to visible thinking across tool rounds', async (key) => {
+      const round = toolRound(0);
+      round[0] = message(vscode.LanguageModelChatMessageRole.Assistant,
+        new vscode.LanguageModelThinkingPart('visible summary', 'rs_encrypted', {
+          [key]: 'opaque-reasoning', _completeThinking: 'display-only complete thought',
+        }),
+      );
+      const request = await send([
+        message(vscode.LanguageModelChatMessageRole.User, new vscode.LanguageModelTextPart('question')),
+        ...round, ...toolRound(1),
+      ]);
+      expect(request).toMatchObject({ input: [
+        { role: 'user', content: [{ type: 'input_text', text: 'question' }] },
+        { type: 'reasoning', id: 'rs_encrypted', summary: [], encrypted_content: 'opaque-reasoning' },
+        ...expectedToolInput(0).slice(1), ...expectedToolInput(1),
+      ] });
+      expect(JSON.stringify(request)).not.toContain('visible summary');
+      expect(JSON.stringify(request)).not.toContain('display-only complete thought');
+    },
+  );
+
+  it.each([
+    { metadata: { redactedData: 'legacy', encrypted_content: 'wire', encrypted: 'short' }, expected: 'legacy' },
+    { metadata: { redactedData: '', encrypted_content: 'wire', encrypted: 'short' }, expected: 'wire' },
+    { metadata: { redactedData: 42, encrypted_content: 'wire' }, expected: 'wire' },
+    { metadata: { redactedData: null, encrypted_content: false, encrypted: 'short' }, expected: 'short' },
+  ])('uses the first nonempty ciphertext: $metadata', async ({ metadata, expected }) => {
+    const request = await send([message(vscode.LanguageModelChatMessageRole.Assistant,
+      new vscode.LanguageModelThinkingPart('summary', undefined, { ...metadata, signature: 'rs_signature' }),
+    )]);
+    expect(request).toMatchObject({ input: [{
+      type: 'reasoning', id: 'rs_signature', summary: [], encrypted_content: expected,
+    }] });
+  });
+
+  it.each([
+    { value: 'visible thought', metadata: {}, expected: ['visible thought'] },
+    { value: ['first', 'second'], metadata: { encrypted_content: '', encrypted: null }, expected: ['first', 'second'] },
+    { value: 'summary', metadata: { _completeThinking: 'complete thought', encrypted: '' }, expected: ['complete thought'] },
+    { value: ['first', 'second'], metadata: { _completeThinking: '' }, expected: ['first', 'second'] },
+  ])('retains plaintext fallback: $value', async ({ value, metadata, expected }) => {
+    expect(await send([message(vscode.LanguageModelChatMessageRole.Assistant,
+      new vscode.LanguageModelThinkingPart(value, 'rs_plain', metadata),
+    )])).toMatchObject({ input: [{
+      type: 'reasoning', id: 'rs_plain', summary: [],
+      content: expected.map((text) => ({ type: 'reasoning_text', text })),
+    }] });
+  });
+
+  function trustedRound(identity: string, status: string) {
+    const reasoning = {
+      type: 'reasoning', id: 'rs_trusted', status,
+      summary: [{ type: 'summary_text', text: 'summary' }],
+      content: [{ type: 'reasoning_text', text: 'compatibility reasoning' }],
+      encrypted_content: 'trusted-ciphertext', vendor_extension: { retained: true },
+    };
+    const assistant = {
+      type: 'message', id: 'msg_prior', role: 'assistant', status: 'completed', phase: 'commentary',
+      content: [{ type: 'output_text', text: 'prior answer', annotations: [] }],
+    };
+    const call = {
+      type: 'function_call', id: 'fc_prior', call_id: 'call-prior', name: 'inspect',
+      arguments: '{}', status: 'completed',
+    };
+    const expectedReasoning = { ...reasoning };
+    Reflect.deleteProperty(expectedReasoning, 'status');
+    return {
+      messages: [
+        message(vscode.LanguageModelChatMessageRole.User, new vscode.LanguageModelTextPart('earlier')),
+        message(vscode.LanguageModelChatMessageRole.Assistant, createMarker(identity, [reasoning, assistant, call])),
+        message(vscode.LanguageModelChatMessageRole.User,
+          new vscode.LanguageModelToolResultPart('call-prior', [new vscode.LanguageModelTextPart('prior result')]),
+        ),
+        message(vscode.LanguageModelChatMessageRole.User, new vscode.LanguageModelTextPart('continue')),
+        ...toolRound(0),
+      ],
+      fullInput: [
+        { role: 'user', content: [{ type: 'input_text', text: 'earlier' }] },
+        expectedReasoning, assistant, call,
+        { type: 'function_call_output', call_id: 'call-prior', output: 'prior result' },
+        { role: 'user', content: [{ type: 'input_text', text: 'continue' }] },
+        ...expectedToolInput(0),
+      ],
+      continuationInput: [
+        { type: 'function_call_output', call_id: 'call-prior', output: 'prior result' },
+        { role: 'user', content: [{ type: 'input_text', text: 'continue' }] },
+        ...expectedToolInput(0),
+      ],
+    };
+  }
+
+  it.each(['completed', 'in_progress', 'incomplete'])(
+    'normalizes reasoning status %s in stateless serialized history', async (status) => {
+      const configuration: ProviderConfig = { ...config, extraBody: { store: false } };
+      const history = trustedRound(createStatefulMarkerIdentity(configuration, model), status);
+      const requests = await sendRequests(history.messages, { configuration });
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({ store: false, input: history.fullInput });
+      expect(requests[0]).not.toHaveProperty('previous_response_id');
+    },
+  );
+
+  it('keeps successful continuation limited to the trusted-boundary suffix', async () => {
+    const history = trustedRound(createStatefulMarkerIdentity(config, model), 'completed');
+    const requests = await sendRequests(history.messages);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ previous_response_id: 'resp-trusted', input: history.continuationInput });
+  });
+
+  it('replays normalized full history after continuation is rejected', async () => {
+    const history = trustedRound(createStatefulMarkerIdentity(config, model), 'completed');
+    const requests = await sendRequests(history.messages, { rejectContinuation: true });
+    expect(requests).toHaveLength(2);
+    expect(requests[0]).toMatchObject({ previous_response_id: 'resp-trusted', input: history.continuationInput });
+    expect(requests[1]).not.toHaveProperty('previous_response_id');
+    expect(requests[1]).toMatchObject({ input: history.fullInput });
+  });
+
+  it('uses normalized full input in a stateless WebSocket response.create payload', async () => {
+    const configuration: ProviderConfig = { ...config, transport: 'websocket', extraBody: { store: false } };
+    const requestModel: ModelConfig = { ...model, stream: true };
+    const history = trustedRound(createStatefulMarkerIdentity(configuration, requestModel), 'completed');
+    const frames: unknown[] = [];
+    vi.spyOn(webSocketSessionManager, 'createRequest').mockImplementation(async (_target, payload) => {
+      frames.push(JSON.parse(JSON.stringify(payload)));
+      return {
+        reusedConnection: false,
+        stream: (async function* () {
+          yield { type: 'response.completed', response: completedResponse(), sequence_number: 1 };
+        })(),
+        release: () => undefined,
+        terminate: () => undefined,
+      };
+    });
+    expect(await sendRequests(history.messages, { configuration, requestModel })).toEqual([]);
+    expect(frames).toHaveLength(1);
+    expect(frames[0]).toMatchObject({ type: 'response.create', store: false, input: history.fullInput });
+    expect(frames[0]).not.toHaveProperty('input.1.status');
+    expect(frames[0]).not.toHaveProperty('previous_response_id');
+    expect(frames[0]).not.toHaveProperty('stream');
+  });
+});
 
 describe('Responses markerless history requests', () => {
   it.each([false, true])(

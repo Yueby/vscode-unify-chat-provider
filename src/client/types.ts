@@ -43,6 +43,9 @@ export interface ThinkingBlockMetadata {
    * VSCode use this.
    */
   redactedData?: string;
+  /** Encrypted Responses reasoning supplied by chat hosts. */
+  encrypted_content?: string;
+  encrypted?: string;
 
   /**
    * The complete thinking content (if available).

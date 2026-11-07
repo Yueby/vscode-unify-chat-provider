@@ -370,6 +370,13 @@ function normalizeMarkerOutputItem(
   item: OpenAIResponsesOutputItem,
 ): OpenAIResponsesInputItem {
   switch (item.type) {
+    case 'reasoning': {
+      // Some Responses-compatible endpoints reject the returned status on input.
+      const inputItem = { ...item };
+      delete inputItem.status;
+      return inputItem;
+    }
+
     case 'compaction': {
       const agentName = readAgentName(item);
       if (agentName !== undefined) {
@@ -935,8 +942,8 @@ export class OpenAIResponsesProvider implements ApiProvider {
       }
     }
 
-    // Reuse raw response output items from the stateful marker verbatim so assistant
-    // metadata such as `phase` survives follow-up requests.
+    // Replay marker output through input normalization while preserving assistant
+    // metadata such as `phase` on follow-up requests.
     for (const [param, raw] of rawMap) {
       const index = outItems.indexOf(param);
       if (index === -1) continue;
@@ -1037,16 +1044,19 @@ export class OpenAIResponsesProvider implements ApiProvider {
         throw new Error('Thinking parts can only appear in assistant messages');
       }
       const metadata = part.metadata as ThinkingBlockMetadata | undefined;
+      const encryptedContent = [
+        metadata?.redactedData, metadata?.encrypted_content, metadata?.encrypted,
+      ].find((value): value is string => typeof value === 'string' && value.length > 0);
       const id = part.id ?? metadata?.signature ?? `reasoning_${randomUUID()}`;
       const completeThinking = metadata?._completeThinking;
       const contents =
         typeof part.value === 'string' ? [part.value] : part.value;
-      if (metadata?.redactedData) {
+      if (encryptedContent !== undefined) {
         return {
           type: 'reasoning',
           id,
           summary: [],
-          encrypted_content: metadata.redactedData,
+          encrypted_content: encryptedContent,
         };
       } else {
         return {
