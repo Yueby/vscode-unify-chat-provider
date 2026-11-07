@@ -296,6 +296,7 @@ vi.mock("vscode", () => {
 import * as vscodeApi from "vscode";
 import {
   COPILOT_PROMPT_CONTEXT_TIMEOUT_MS,
+  copilotDisplayPath,
   CopilotWorkspaceAdapter,
 } from "../../src/completion/copilot/workspace";
 import {
@@ -563,6 +564,32 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+describe("Copilot workspace URI paths", () => {
+  it.each([
+    ["file:///C:/workspace", "file:///c%3A/workspace/Src/File.ts", "Src/File.ts"],
+    ["file:///c:/workspace/", "file:///C:/workspace/File.ts", "File.ts"],
+    ["file:///C:/workspace", "file:///c:/workspace", ""],
+    ["file:///C:/", "file:///c:/Src/File.ts", "Src/File.ts"],
+    ["file:///C:/workspace", "file:///d:/workspace/file.ts", undefined],
+    ["file:///C:/workspace", "file:///c:/workspace-other/file.ts", undefined],
+    ["file:///C:/Workspace", "file:///c:/workspace/file.ts", undefined],
+    ["file:///Workspace", "file:///workspace/file.ts", undefined],
+    ["file:///C:folder", "file:///c:folder/file.ts", undefined],
+    ["vscode-remote://host/C:/workspace", "vscode-remote://host/c:/workspace/file.ts", undefined],
+    ["vscode-remote://host/workspace", "vscode-remote://other/workspace/file.ts", undefined],
+    ["file:///C:/workspace", "vscode-remote://host/C:/workspace/file.ts", undefined],
+  ] as const)("maps workspace %s and document %s", (root, target, expected) => {
+    vi.spyOn(vscodeApi.workspace, "getWorkspaceFolder").mockReturnValue({
+      uri: vscodeApi.Uri.parse(root),
+      name: "workspace",
+      index: 0,
+    });
+
+    expect(copilotDisplayPath(vscodeApi.Uri.parse(target))).toBe(expected);
+  });
 });
 
 describe("CopilotWorkspaceAdapter event state", () => {
@@ -2802,6 +2829,43 @@ describe("CopilotWorkspaceAdapter event state", () => {
     ).toBe(true);
     expect(mock.findFilesCalls).toHaveLength(2);
     adapter.dispose();
+  });
+
+  it("preserves ignore gating across Windows URI drive-letter casing and cache reloads", async () => {
+    const root = vscodeApi.Uri.parse("file:///C:/workspace");
+    vi.spyOn(vscodeApi.workspace, "getWorkspaceFolder").mockReturnValue({
+      uri: root,
+      name: "workspace",
+      index: 0,
+    });
+    const ignored = mutableDocument("file:///c:/workspace/ignored.ts", "ignored\n");
+    const kept = mutableDocument("file:///c:/workspace/Kept.ts", "kept\n");
+    const ignoreUri = vscodeApi.Uri.parse("file:///c:/workspace/.copilotignore");
+    mock.documents = [ignored.document, kept.document];
+    mock.findFilesResults = [ignoreUri];
+    mock.files.set(ignoreUri.toString(), "ignored.ts\n");
+    let finishLoad: (() => void) | undefined;
+    mock.findFilesGate = new Promise<void>((resolve) => { finishLoad = resolve; });
+    const adapter = new CopilotWorkspaceAdapter(() => 100);
+    try {
+      expect(adapter.isEligibleForNesTrigger(ignored.document)).toBe(false);
+      expect(adapter.isEligibleForNesTrigger(kept.document)).toBe(false);
+      finishLoad?.();
+      expect(await adapter.isDocumentIgnoredWithRules(ignored.document, token())).toBe(true);
+      expect(adapter.snapshot(kept.document).relativePath).toBe("Kept.ts");
+      expect(adapter.isEligibleForNesTrigger(ignored.document)).toBe(false);
+      expect(adapter.isEligibleForNesTrigger(kept.document)).toBe(true);
+
+      mock.findFilesGate = undefined;
+      mock.files.set(ignoreUri.toString(), "Kept.ts\n");
+      fire(mock.ignoreChangeListeners, ignoreUri);
+      expect(await adapter.isDocumentIgnoredWithRules(kept.document, token())).toBe(true);
+      expect(adapter.isEligibleForNesTrigger(kept.document)).toBe(false);
+      expect(adapter.isEligibleForNesTrigger(ignored.document)).toBe(true);
+      expect(mock.findFilesCalls).toHaveLength(2);
+    } finally {
+      adapter.dispose();
+    }
   });
 
   it("fails NES event eligibility closed while ignore rules load and reload", async () => {

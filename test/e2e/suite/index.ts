@@ -3369,7 +3369,10 @@ export async function run(): Promise<void> {
   assert.equal(simpleRequest?.kind, "simple");
   if (simpleRequest?.kind === "simple") {
     assert.equal(simpleRequest.prefix, "export const fixture = true;");
-    assert.equal(simpleRequest.suffix, "\n");
+    assert.equal(
+      simpleRequest.suffix,
+      document.eol === vscode.EndOfLine.CRLF ? "\r\n" : "\n",
+    );
   }
 
   await setResponse(undefined);
@@ -3511,6 +3514,10 @@ export async function run(): Promise<void> {
       0,
       "The completions group should be excluded while Unify is registered",
     );
+    // Model-catalog events during the probe may legitimately replace runtimes.
+    // Compare only across the configuration update under test.
+    const runtimeInstancesBeforeCoexistence =
+      (await getCompletionState()).runtimeInstances;
 
     await completionConfiguration.update(
       "strategy",
@@ -3526,13 +3533,15 @@ export async function run(): Promise<void> {
     assert.deepEqual(coexistenceState.excludedProviderGroups, []);
     assert.deepEqual(
       coexistenceState.runtimeInstances,
-      defaultExcludesState.runtimeInstances,
+      runtimeInstancesBeforeCoexistence,
       "Changing built-in completion exclusion must preserve algorithm runtimes",
     );
     assert.ok(
       (await invokeExcludedProbe(true)) > 0,
       "The completions group should remain callable when exclusion is disabled",
     );
+    const runtimeInstancesBeforeRestore =
+      (await getCompletionState()).runtimeInstances;
 
     await completionConfiguration.update(
       "strategy",
@@ -3552,7 +3561,7 @@ export async function run(): Promise<void> {
     ]);
     assert.deepEqual(
       restoredExcludesState.runtimeInstances,
-      defaultExcludesState.runtimeInstances,
+      runtimeInstancesBeforeRestore,
       "Restoring built-in completion exclusion must preserve algorithm runtimes",
     );
     assert.equal(

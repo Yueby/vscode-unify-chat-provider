@@ -254,6 +254,13 @@ function normalizeRelativePath(value: string): string {
   return value.replace(/\\/g, "/").replace(/^\.\//, "").replace(/^\/+/, "");
 }
 
+function uriPathForComparison(uri: vscode.Uri): string {
+  // VS Code can expose the same Windows drive with different URI casing.
+  return uri.scheme === "file"
+    ? uri.path.replace(/^\/[A-Z]:(?=\/|$)/, (drive) => drive.toLowerCase())
+    : uri.path;
+}
+
 function relativeUriPath(
   root: vscode.Uri,
   target: vscode.Uri,
@@ -261,12 +268,13 @@ function relativeUriPath(
   if (root.scheme !== target.scheme || root.authority !== target.authority) {
     return undefined;
   }
-  const rootPath = root.path.replace(/\/+$/, "");
-  if (target.path === rootPath) {
+  const rootPath = uriPathForComparison(root).replace(/\/+$/, "");
+  const targetPath = uriPathForComparison(target);
+  if (targetPath === rootPath) {
     return "";
   }
   const prefix = `${rootPath}/`;
-  return target.path.startsWith(prefix)
+  return targetPath.startsWith(prefix)
     ? normalizeRelativePath(target.path.slice(prefix.length))
     : undefined;
 }
