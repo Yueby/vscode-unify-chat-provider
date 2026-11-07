@@ -1246,7 +1246,7 @@ export class OpenAIResponsesProvider implements ApiProvider {
     }
   }
 
-  private normalizeReasoningEffortForOpenAi(
+  protected normalizeReasoningEffortForOpenAi(
     model: ModelConfig,
   ): 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' {
     const effort = model.thinking?.effort;

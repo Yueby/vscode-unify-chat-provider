@@ -30,6 +30,7 @@ import {
 import type { ModelConfig, ProviderConfig } from '../../src/types';
 import { findBestMatchingWellKnownModel, mergeWithWellKnownModel } from '../../src/well-known/models';
 import { resolveProviderModels, WELL_KNOWN_PROVIDERS } from '../../src/well-known/providers';
+import { reasoningEffort } from '../../src/well-known/preset-templates';
 
 const openai: ProviderConfig = {
   name: 'OpenAI', type: 'openai-responses', baseUrl: 'https://api.openai.com/v1', models: [],
@@ -170,19 +171,23 @@ describe('GPT model request compatibility', () => {
     }, false])).toEqual({ reasoning: { effort: expected } });
   });
 
-  it('keeps OAuth prompt and output policy when catalog metadata is merged', async () => {
+  it('preserves max for a Codex OAuth model whose current template advertises it', () => {
     const codex: ProviderConfig = {
       ...openai, type: 'openai-codex', auth: { method: 'openai-codex', bindingId: 'catalog-test' },
     };
-    const models = await new OpenAICodexProvider(codex).getAvailableModels({ kind: 'none' });
-    for (const id of gptIds) {
-      const raw = models.find((model) => model.id === id);
-      if (!raw) throw new Error(`Missing Codex model: ${id}`);
-      expect(Object.hasOwn(raw, 'maxOutputTokens')).toBe(true);
-      expect(mergeWithWellKnownModel(raw, codex)).toMatchObject({
-        id, maxInputTokens: 272000, maxOutputTokens: undefined,
-      });
-    }
+    const model: ModelConfig = {
+      id: 'account-specific-model', thinking: { type: 'enabled', effort: 'max' },
+      presetTemplates: [reasoningEffort({ supported: ['medium', 'max'], default: 'medium' })],
+    };
+    expect(invoke(new OpenAICodexProvider(codex), 'buildReasoningParams', [model, false]))
+      .toEqual({ reasoning: { effort: 'max' } });
+    expect(invoke(new OpenAICodexProvider(codex), 'buildReasoningParams', [{
+      ...model, presetTemplates: [],
+    }, false])).toEqual({ reasoning: { effort: 'xhigh' } });
+    expect(invoke(new OpenAICodexProvider({ ...codex, auth: { method: 'api-key' } }),
+      'buildReasoningParams', [model, false])).toEqual({ reasoning: { effort: 'xhigh' } });
+    expect(invoke(new OpenAIResponsesProvider(openai), 'buildReasoningParams', [model, false]))
+      .toEqual({ reasoning: { effort: 'xhigh' } });
   });
 });
 

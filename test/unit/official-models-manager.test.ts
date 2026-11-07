@@ -77,10 +77,12 @@ import {
   type OfficialModelsExtensionContext,
 } from '../../src/official-models-manager';
 import { SecretStore } from '../../src/secret/secret-store';
-import type { ProviderConfig } from '../../src/types';
+import type { ModelConfig, ProviderConfig } from '../../src/types';
+import { applyPresetTemplateSelections } from '../../src/preset-templates';
 import { resolveCommandCodeProtocol } from '../../src/client/command-code/protocol';
 
 const ZED_BINDING_ID = '00000000-0000-4000-8000-000000000103';
+const CODEX_BINDING_ID = '00000000-0000-4000-8000-000000001367';
 
 class MemoryMemento implements vscode.Memento {
   constructor(private readonly values: Map<string, unknown>) {}
@@ -136,6 +138,26 @@ function commandCodeProvider(): ProviderConfig {
     baseUrl: 'https://api.commandcode.ai/provider/v1',
     models: [],
     autoFetchOfficialModels: true,
+  };
+}
+
+function codexProvider(): ProviderConfig {
+  return {
+    type: 'openai-codex', name: 'Codex', baseUrl: 'https://api.openai.com/v1',
+    auth: { method: 'openai-codex', bindingId: CODEX_BINDING_ID },
+    models: [], autoFetchOfficialModels: true,
+  };
+}
+
+function codexAuthManager(getAccount: () => string = () => 'account-a'): OfficialModelsAuthManager {
+  return {
+    getCredential: async () => ({
+      value: 'catalog-token', tokenType: 'Bearer',
+      authContext: {
+        method: 'openai-codex', bindingId: CODEX_BINDING_ID,
+        sessionId: getAccount(), revision: 1, accountId: getAccount(),
+      },
+    }),
   };
 }
 
@@ -361,5 +383,113 @@ describe('official model manager provider boundary', () => {
     ]);
     expect(resolveCommandCodeProtocol(models[0])).toBe('anthropic-messages');
     secondManager.dispose();
+  });
+});
+
+describe('Codex official-model cache integration', () => {
+  it('caches successful catalogs, honors force, preserves errors and accepts an empty replacement', async () => {
+    const config = codexProvider();
+    const manager = new OfficialModelsManager();
+    await manager.initialize(context(new Map()), configStore(config), secretStore(), codexAuthManager());
+    try {
+      providerClient.getAvailableModels.mockResolvedValueOnce([{ id: 'codex-account-model' }]);
+      const first = await manager.getOfficialModels(config, true);
+      expect(await manager.getOfficialModels(config)).toEqual(first);
+      expect(providerClient.getAvailableModels).toHaveBeenCalledOnce();
+
+      providerClient.getAvailableModels.mockRejectedValueOnce(new Error('HTTP 503'));
+      expect(await manager.getOfficialModels(config, true)).toEqual(first);
+      expect(manager.getProviderState(config.name)?.lastError).toBe('HTTP 503');
+      expect(await manager.getOfficialModels(config)).toEqual(first);
+      expect(providerClient.getAvailableModels).toHaveBeenCalledTimes(2);
+
+      providerClient.getAvailableModels.mockResolvedValueOnce([]);
+      expect(await manager.getOfficialModels(config, true)).toEqual([]);
+      expect(await manager.getOfficialModels(config)).toEqual([]);
+      expect(manager.getProviderState(config.name)?.lastError).toBeUndefined();
+      expect(providerClient.getAvailableModels).toHaveBeenCalledTimes(3);
+    } finally {
+      manager.dispose();
+    }
+  });
+
+  it('does not restore an earlier account catalog after auth invalidation and a failed refresh', async () => {
+    const config = codexProvider();
+    let account = 'account-a';
+    const manager = new OfficialModelsManager();
+    await manager.initialize(context(new Map()), configStore(config), secretStore(), codexAuthManager(() => account));
+    try {
+      providerClient.getAvailableModels.mockResolvedValueOnce([{ id: 'account-a-model' }]);
+      await manager.getOfficialModels(config, true);
+      account = 'account-b';
+      await manager.clearProviderState(config.name);
+      providerClient.getAvailableModels.mockRejectedValueOnce(new Error('HTTP 401'));
+      expect(await manager.getOfficialModels(config, true)).toEqual([]);
+      expect(manager.getProviderState(config.name)?.lastError).toBe('HTTP 401');
+      expect(manager.getProviderState(config.name)?.models).toEqual([]);
+    } finally {
+      manager.dispose();
+    }
+  });
+
+  it('ignores a late response from an invalidated account request', async () => {
+    const config = codexProvider();
+    let account = 'account-a';
+    let release: ((models: ModelConfig[]) => void) | undefined;
+    let firstSignal: AbortSignal | undefined;
+    providerClient.getAvailableModels.mockImplementationOnce(
+      (_credential, _refresh, signal: AbortSignal) => {
+        firstSignal = signal;
+        return new Promise<ModelConfig[]>((resolve) => { release = resolve; });
+      },
+    ).mockResolvedValueOnce([{ id: 'account-b-model' }]);
+    const manager = new OfficialModelsManager();
+    await manager.initialize(context(new Map()), configStore(config), secretStore(), codexAuthManager(() => account));
+    try {
+      const first = manager.getOfficialModels(config, true);
+      await vi.waitFor(() => expect(providerClient.getAvailableModels).toHaveBeenCalledOnce());
+      account = 'account-b';
+      await manager.clearProviderState(config.name);
+      expect(firstSignal?.aborted).toBe(true);
+      await manager.getOfficialModels(config, true);
+      release?.([{ id: 'account-a-model' }]);
+      await first;
+      expect(manager.getProviderState(config.name)?.models.map((model) => model.id)).toEqual(['account-b-model']);
+    } finally {
+      manager.dispose();
+    }
+  });
+
+  it('retains authoritative metadata after well-known merging and a JSON cache restart', async () => {
+    const config = codexProvider();
+    const storage = new Map<string, unknown>();
+    const raw: ModelConfig = {
+      id: 'gpt-6.1-sol', maxInputTokens: 475000, maxOutputTokens: undefined,
+      thinking: undefined, verbosity: undefined, presetTemplates: [],
+      capabilities: { toolCalling: true, imageInput: false, editTools: 'multi-find-replace' },
+    };
+    providerClient.getAvailableModels.mockResolvedValueOnce([raw]);
+    const first = new OfficialModelsManager();
+    await first.initialize(context(storage), configStore(config), secretStore(), codexAuthManager());
+    await first.getOfficialModels(config, true);
+    first.dispose();
+    const persisted: unknown = JSON.parse(JSON.stringify(storage.get('officialModelsState')));
+    providerClient.getAvailableModels.mockReset();
+    const second = new OfficialModelsManager();
+    await second.initialize(context(new Map([['officialModelsState', persisted]])), configStore(config), secretStore(), codexAuthManager());
+    try {
+      const [cached] = await second.getOfficialModels(config);
+      expect(providerClient.getAvailableModels).not.toHaveBeenCalled();
+      expect(cached).toMatchObject({
+        id: 'gpt-6.1-sol', maxInputTokens: 475000, presetTemplates: [],
+        capabilities: { toolCalling: true, imageInput: false, editTools: 'multi-find-replace' },
+      });
+      expect(cached.maxOutputTokens).toBeUndefined();
+      expect(applyPresetTemplateSelections(cached, undefined).thinking).toBeUndefined();
+      expect(applyPresetTemplateSelections(cached, undefined).verbosity).toBeUndefined();
+      expect(JSON.stringify(persisted)).not.toContain('catalog-token');
+    } finally {
+      second.dispose();
+    }
   });
 });

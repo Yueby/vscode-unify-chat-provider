@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import * as vscode from 'vscode';
-import type { AuthTokenInfo, AuthTokenRefresh } from '../../auth/types';
-import type { ProviderHttpLogger } from '../../logger';
+import type { AuthTokenInfo, AuthTokenRefresh, CodexAuthContext } from '../../auth/types';
+import { createSimpleHttpLogger, type ProviderHttpLogger } from '../../logger';
 import {
   DEFAULT_NORMAL_TIMEOUT_CONFIG,
   FetchMode,
@@ -9,7 +9,7 @@ import {
   resolveChatNetwork,
   resolveSdkTotalTimeoutMs,
 } from '../../utils';
-import type { ModelConfig } from '../../types';
+import type { ModelConfig, ThinkingEffort } from '../../types';
 import { createCustomFetch, getToken } from '../utils';
 import {
   OpenAIResponsesProvider,
@@ -18,11 +18,15 @@ import {
 } from './responses-client';
 import { randomUUID } from 'crypto';
 import { codexBaseInstructionsForModel } from './codex-instructions';
+import { parseCodexModelCatalog } from './codex-model-catalog';
 
+const CODEX_CLIENT_VERSION = '0.135.0';
 const CODEX_API_ENDPOINT = 'https://chatgpt.com/backend-api/codex/responses';
+const CODEX_MODELS_ENDPOINT =
+  `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`;
 // Align with CLIProxyAPI internal/runtime/executor/codex_executor.go defaults.
 const CODEX_USER_AGENT =
-  'codex-tui/0.135.0 (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; 0.135.0)';
+  `codex-tui/${CODEX_CLIENT_VERSION} (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; ${CODEX_CLIENT_VERSION})`;
 const CODEX_ORIGINATOR = 'codex-tui';
 // Align with CLIProxyAPI codex_websockets_executor.go.
 const CODEX_RESPONSES_WEBSOCKET_BETA = 'responses_websockets=2026-02-06';
@@ -39,16 +43,43 @@ const CODEX_COMMON_REQUEST_FIELDS_TO_DELETE = [
   'frequency_penalty',
   'presence_penalty',
 ] as const;
-const CODEX_REASONING_SUMMARY_DEFAULTS = {
-  maxOutputTokens: undefined,
-  thinking: {
-    type: 'enabled',
-    effort: 'xhigh',
-    summary: 'auto',
-  },
-} satisfies Pick<ModelConfig, 'maxOutputTokens' | 'thinking'>;
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function codexModelToken(credential: AuthTokenInfo): string {
+  const token = getToken(credential);
+  if (!token?.trim()) throw new Error('Authentication required to fetch Codex models');
+  return token;
+}
+
+function codexDiscoveryContext(
+  credential: AuthTokenInfo,
+  bindingId: string,
+): CodexAuthContext | undefined {
+  const context = credential.kind === 'token' ? credential.authContext : undefined;
+  if (context === undefined) return undefined;
+  if (context.method !== 'openai-codex' || context.bindingId !== bindingId) {
+    throw new Error('Codex authentication context changed during model discovery.');
+  }
+  // Snapshot identity before awaiting network or credential refresh work.
+  return {
+    method: 'openai-codex', bindingId: context.bindingId,
+    sessionId: context.sessionId, revision: context.revision,
+    accountId: context.accountId?.trim() || undefined,
+  };
+}
+
+function assertCodexDiscoveryContext(
+  initial: CodexAuthContext | undefined,
+  current: CodexAuthContext | undefined,
+): void {
+  if (initial === undefined && current === undefined) return;
+  if (!initial || !current || initial.bindingId !== current.bindingId ||
+    initial.sessionId !== current.sessionId || initial.accountId !== current.accountId ||
+    current.revision < initial.revision) {
+    throw new Error('Codex authentication context changed during model discovery.');
+  }
 }
 
 function isResponsesClientEvent(
@@ -251,6 +282,15 @@ function readStringHeader(
  * - OAuth account identity headers only for openai-codex auth
  */
 export class OpenAICodexProvider extends OpenAIResponsesProvider {
+  protected override normalizeReasoningEffortForOpenAi(model: ModelConfig): ThinkingEffort {
+    if (this.config.auth?.method === 'openai-codex' && model.thinking?.effort === 'max' &&
+      model.presetTemplates?.some((template) => template.id === 'reasoningEffort' &&
+        template.presets.some((preset) => preset.config.thinking?.effort === 'max'))) {
+      return 'max';
+    }
+    return super.normalizeReasoningEffortForOpenAi(model);
+  }
+
   protected override shouldEnableResponsesContextManagement(
     model: ModelConfig,
   ): boolean {
@@ -448,65 +488,78 @@ export class OpenAICodexProvider extends OpenAIResponsesProvider {
     refreshCredential?: AuthTokenRefresh,
     signal?: AbortSignal,
   ): Promise<ModelConfig[]> {
-    // Only the ChatGPT OAuth backend lacks a usable /models endpoint; custom
-    // endpoints (e.g. local proxies with API-key auth) serve their own list.
-    if (this.config.auth?.method !== 'openai-codex') {
+    // API-key and custom endpoints keep standard Responses model discovery.
+    const auth = this.config.auth;
+    if (auth?.method !== 'openai-codex') {
       return super.getAvailableModels(credential, refreshCredential, signal);
     }
-
-    return [
-      {
-        id: 'gpt-6-astra',
-        maxInputTokens: 272000,
-        ...CODEX_REASONING_SUMMARY_DEFAULTS,
-      },
-      // Keep a conservative OAuth prompt budget for account-dependent limits.
-      {
-        id: 'gpt-6.1-sol',
-        maxInputTokens: 272000,
-        ...CODEX_REASONING_SUMMARY_DEFAULTS,
-      },
-      {
-        id: 'gpt-6.1-terra',
-        maxInputTokens: 272000,
-        ...CODEX_REASONING_SUMMARY_DEFAULTS,
-      },
-      {
-        id: 'gpt-6-sol',
-        maxInputTokens: 272000,
-        ...CODEX_REASONING_SUMMARY_DEFAULTS,
-      },
-      {
-        id: 'gpt-6-luna',
-        maxInputTokens: 272000,
-        ...CODEX_REASONING_SUMMARY_DEFAULTS,
-      },
-      {
-        id: 'gpt-5.6-sol',
-        maxInputTokens: 272000,
-        ...CODEX_REASONING_SUMMARY_DEFAULTS,
-      },
-      {
-        id: 'gpt-5.6-terra',
-        maxInputTokens: 272000,
-        ...CODEX_REASONING_SUMMARY_DEFAULTS,
-      },
-      {
-        id: 'gpt-5.6-luna',
-        maxInputTokens: 272000,
-        ...CODEX_REASONING_SUMMARY_DEFAULTS,
-      },
-      {
-        id: 'gpt-5.5',
-        maxInputTokens: 272000,
-        ...CODEX_REASONING_SUMMARY_DEFAULTS,
-      },
-      { id: 'gpt-5.4', ...CODEX_REASONING_SUMMARY_DEFAULTS },
-      { id: 'gpt-5.2', ...CODEX_REASONING_SUMMARY_DEFAULTS },
-      { id: 'gpt-5.4-mini', ...CODEX_REASONING_SUMMARY_DEFAULTS },
-      { id: 'gpt-5.3-codex', ...CODEX_REASONING_SUMMARY_DEFAULTS },
-      { id: 'gpt-5.3-codex-spark', ...CODEX_REASONING_SUMMARY_DEFAULTS },
-    ];
+    signal?.throwIfAborted();
+    codexModelToken(credential);
+    const initialContext = codexDiscoveryContext(credential, auth.bindingId);
+    const verifyContext = (current: AuthTokenInfo): void => {
+      assertCodexDiscoveryContext(initialContext, codexDiscoveryContext(credential, auth.bindingId));
+      if (current !== credential) {
+        assertCodexDiscoveryContext(initialContext, codexDiscoveryContext(current, auth.bindingId));
+      }
+    };
+    const logger = createSimpleHttpLogger({
+      purpose: 'Get Available Models', providerName: this.config.name, providerType: this.config.type,
+    });
+    const fetchWithNetwork = createCustomFetch({
+      connectionTimeoutMs: DEFAULT_NORMAL_TIMEOUT_CONFIG.connection,
+      responseTimeoutMs: DEFAULT_NORMAL_TIMEOUT_CONFIG.response,
+      proxy: resolveChatNetwork(this.config).proxy,
+      logger, type: 'normal', abortSignal: signal,
+    });
+    const request = async (current: AuthTokenInfo): Promise<Response> => {
+      signal?.throwIfAborted();
+      verifyContext(current);
+      const headers = this.buildHeaders(this.generateSessionId(), current);
+      deleteHeaderVariants(headers, 'authorization');
+      headers['Authorization'] = `Bearer ${codexModelToken(current)}`;
+      headers['Accept'] = 'application/json';
+      const response = await fetchWithNetwork(CODEX_MODELS_ENDPOINT, {
+        method: 'GET', headers: sanitizeCodexHeaders(headers), signal, redirect: 'error',
+      });
+      try {
+        signal?.throwIfAborted();
+        verifyContext(current);
+        return response;
+      } catch (error) {
+        await response.body?.cancel().catch(() => undefined);
+        throw error;
+      }
+    };
+    try {
+      let current = credential;
+      let response = await request(current);
+      signal?.throwIfAborted();
+      if (response.status === 401 && refreshCredential && initialContext) {
+        await response.body?.cancel().catch(() => undefined);
+        signal?.throwIfAborted();
+        verifyContext(current);
+        current = await refreshCredential();
+        signal?.throwIfAborted();
+        response = await request(current);
+        signal?.throwIfAborted();
+      }
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        signal?.throwIfAborted();
+        throw OpenAI.APIError.generate(response.status, undefined,
+          `Failed to get available Codex models: HTTP ${response.status}`, response.headers);
+      }
+      const raw: unknown = await response.json();
+      signal?.throwIfAborted();
+      verifyContext(current);
+      const models = parseCodexModelCatalog(raw);
+      signal?.throwIfAborted();
+      return models;
+    } catch (error) {
+      signal?.throwIfAborted();
+      logger.error(error);
+      throw error;
+    }
   }
 }
 

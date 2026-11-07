@@ -8,6 +8,12 @@ const state = vi.hoisted(() => ({
 
 vi.mock('vscode', () => ({
   LanguageModelChatMessageRole: { User: 1, Assistant: 2, System: 3 },
+  env: { language: 'en' },
+  l10n: { t: (message: string) => message },
+}));
+
+vi.mock('../../src/logger', () => ({
+  createSimpleHttpLogger: () => ({ error: () => undefined }),
 }));
 
 vi.mock('../../src/utils', () => ({
@@ -76,14 +82,13 @@ describe('OpenAI Codex model list', () => {
     );
   });
 
-  it('keeps the built-in model list for ChatGPT OAuth auth', async () => {
+  it('requires credentials for authenticated ChatGPT model discovery', async () => {
     const provider = new OpenAICodexProvider(
       createConfig({ method: 'openai-codex', bindingId: 'binding-1' }),
     );
 
-    const models = await provider.getAvailableModels({ kind: 'none' });
-
+    await expect(provider.getAvailableModels({ kind: 'none' }))
+      .rejects.toThrow('Authentication required');
     expect(state.getAvailableModels).not.toHaveBeenCalled();
-    expect(models.map((model) => model.id)).toContain('gpt-6-astra');
   });
 });
