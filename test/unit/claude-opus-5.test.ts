@@ -27,12 +27,26 @@ function getFeatureBlock(source: string, featureId: string): string {
     throw new Error(`Feature ${featureId} was not found`);
   }
 
-  const rest = source.slice(start);
+  const rest = source.slice(start).replace(/\r\n/g, '\n');
   const end = rest.indexOf('\n  },\n  [FeatureId.');
   return end < 0 ? rest : rest.slice(0, end);
 }
 
 describe('Claude Opus 5 catalog support', () => {
+  it.each(['\n', '\r\n'])('bounds feature blocks with %j line endings', (lineEnding) => {
+    const source = [
+      '[FeatureId.First]: {',
+      '    enabled: true,',
+      '  },',
+      '  [FeatureId.Second]: {',
+      '    enabled: false,',
+      '  },',
+    ].join(lineEnding);
+
+    expect(getFeatureBlock(source, 'First')).toContain('enabled: true');
+    expect(getFeatureBlock(source, 'First')).not.toContain('FeatureId.Second');
+  });
+
   const model = WELL_KNOWN_MODELS.find(
     (candidate) => candidate.id === 'claude-opus-5',
   );

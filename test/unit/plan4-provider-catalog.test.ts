@@ -44,9 +44,9 @@ describe('Plan 4 provider definitions', () => {
     expect(source).not.toMatch(/^\s*\| 'mistral'$/m);
   });
 
-  it('gates max_tokens-only behavior by provider base URL', () => {
-    const featureBlock = source.match(
-      /\[FeatureId\.OpenAIOnlyMaxTokens\]: \{([\s\S]*?)\n  \},\n  \[FeatureId\.OpenAICacheControl\]/,
+  it.each(['\n', '\r\n'])('gates max_tokens-only behavior with %j line endings', (lineEnding) => {
+    const featureBlock = source.replace(/\r?\n/g, lineEnding).match(
+      /\[FeatureId\.OpenAIOnlyMaxTokens\]: \{([\s\S]*?)\r?\n  \},\r?\n  \[FeatureId\.OpenAICacheControl\]/,
     )?.[1];
 
     expect(featureBlock).toContain("'api.inceptionlabs.ai'");

@@ -16,6 +16,7 @@ function replaceOnce(
   replacement: string,
   filePath: string,
 ): string {
+  source = source.replace(/\r\n/g, '\n');
   const first = source.indexOf(expected);
   if (first < 0 || source.indexOf(expected, first + expected.length) >= 0) {
     throw new Error(

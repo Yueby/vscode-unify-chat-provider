@@ -1,0 +1,2 @@
+# Preserve canonical snapshot bytes used by the chat-lib provenance manifest.
+src/chat-lib/upstream/** text eol=lf
