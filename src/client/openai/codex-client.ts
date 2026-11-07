@@ -19,14 +19,11 @@ import {
 import { randomUUID } from 'crypto';
 import { codexBaseInstructionsForModel } from './codex-instructions';
 import { parseCodexModelCatalog } from './codex-model-catalog';
+import { getCodexModelsClientVersion } from './codex-model-version';
 
 const CODEX_CLIENT_VERSION = '0.135.0';
-// Keep catalog discovery on a current client compatibility profile.
-// https://github.com/openai/codex/releases/tag/rust-v0.167.0
-const CODEX_MODEL_DISCOVERY_VERSION = '0.167.0';
 const CODEX_API_ENDPOINT = 'https://chatgpt.com/backend-api/codex/responses';
-const CODEX_MODELS_ENDPOINT =
-  `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_MODEL_DISCOVERY_VERSION}`;
+const CODEX_MODELS_ENDPOINT = 'https://chatgpt.com/backend-api/codex/models';
 function codexUserAgent(version: string): string {
   return `codex-tui/${version} (Mac OS 26.5.0; arm64) iTerm.app/3.6.10 (codex-tui; ${version})`;
 }
@@ -510,21 +507,24 @@ export class OpenAICodexProvider extends OpenAIResponsesProvider {
     const logger = createSimpleHttpLogger({
       purpose: 'Get Available Models', providerName: this.config.name, providerType: this.config.type,
     });
+    const proxy = resolveChatNetwork(this.config).proxy;
     const fetchWithNetwork = createCustomFetch({
       connectionTimeoutMs: DEFAULT_NORMAL_TIMEOUT_CONFIG.connection,
       responseTimeoutMs: DEFAULT_NORMAL_TIMEOUT_CONFIG.response,
-      proxy: resolveChatNetwork(this.config).proxy,
+      proxy,
       logger, type: 'normal', abortSignal: signal,
     });
-    const request = async (current: AuthTokenInfo): Promise<Response> => {
+    const request = async (current: AuthTokenInfo, clientVersion: string): Promise<Response> => {
       signal?.throwIfAborted();
       verifyContext(current);
       const headers = this.buildHeaders(this.generateSessionId(), current);
       deleteHeaderVariants(headers, 'authorization');
       headers['Authorization'] = `Bearer ${codexModelToken(current)}`;
       headers['Accept'] = 'application/json';
-      headers['User-Agent'] = codexUserAgent(CODEX_MODEL_DISCOVERY_VERSION);
-      const response = await fetchWithNetwork(CODEX_MODELS_ENDPOINT, {
+      headers['User-Agent'] = `codex-tui/${clientVersion}`;
+      const url = new URL(CODEX_MODELS_ENDPOINT);
+      url.searchParams.set('client_version', clientVersion);
+      const response = await fetchWithNetwork(url.toString(), {
         method: 'GET', headers: sanitizeCodexHeaders(headers), signal, redirect: 'error',
       });
       try {
@@ -537,8 +537,13 @@ export class OpenAICodexProvider extends OpenAIResponsesProvider {
       }
     };
     try {
+      const versionFetch = createCustomFetch({
+        connectionTimeoutMs: 3000, responseTimeoutMs: 3000,
+        retryConfig: { maxRetries: 0 }, proxy, type: 'normal', abortSignal: signal,
+      });
+      const clientVersion = await getCodexModelsClientVersion(versionFetch, signal);
       let current = credential;
-      let response = await request(current);
+      let response = await request(current, clientVersion);
       signal?.throwIfAborted();
       if (response.status === 401 && refreshCredential && initialContext) {
         await response.body?.cancel().catch(() => undefined);
@@ -546,7 +551,7 @@ export class OpenAICodexProvider extends OpenAIResponsesProvider {
         verifyContext(current);
         current = await refreshCredential();
         signal?.throwIfAborted();
-        response = await request(current);
+        response = await request(current, clientVersion);
         signal?.throwIfAborted();
       }
       if (!response.ok) {
@@ -566,7 +571,7 @@ export class OpenAICodexProvider extends OpenAIResponsesProvider {
         (entry) => isRecord(entry) && entry['visibility'] === visibility,
       ).length;
       // Only protocol version and counts: never log catalog contents or auth identity.
-      console.info(`[UCP Codex catalog] version=${CODEX_MODEL_DISCOVERY_VERSION} total=${entries.length} ` +
+      console.info(`[UCP Codex catalog] version=${clientVersion} total=${entries.length} ` +
         `list=${count('list')} hide=${count('hide')} none=${count('none')} returned=${models.length}`);
       return models;
     } catch (error) {

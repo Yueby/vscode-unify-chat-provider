@@ -1092,7 +1092,7 @@ vscode://SmallMain.vscode-unify-chat-provider/import-config?config=<input>&auth=
 - MiniMax M3.1 Flash 和新增 Kimi 配置默认使用 131,072 tokens 输出预算。新增 Kimi Coding 预设按 262,144 tokens 窗口配置；更大窗口及 Highspeed 可用性取决于套餐，高档套餐用户可在预留输出空间的前提下手动调整预算。
 - Gemini 4 Argon 在 AI Studio 默认使用 65,536 tokens 输出预算，在 Vertex AI 默认使用 32,768，以兼容非流式请求。
 - GPT 工具调用推荐使用默认的 OpenAI Responses 格式。上述模型在官方 Chat Completions 配置下保守声明不支持工具；Sol/Luna 选择 `none` 也不会改变静态工具能力声明。
-- Codex OAuth 根据已登录账号的目录动态发现可见模型，按有效上下文窗口计算输入预算并至少预留 5% 空间，输出限制由后端控制。目录查询参数与发现请求 User-Agent 的版本保持一致。
+- Codex OAuth 根据已登录账号的目录动态发现可见模型，按有效上下文窗口计算输入预算并至少预留 5% 空间，输出限制由后端控制。目录查询采用 Codex 最新稳定版本，并与发现请求 User-Agent 保持一致；公开版本信息缓存 30 分钟，查询失败时复用上次版本或已知回退值，不阻断账号目录获取。
 - Codex 目录复用官方模型缓存与强制刷新机制；刷新失败保留上次成功的目录并记录错误，有效空目录会替换旧列表。退出登录或切换鉴权上下文会使该供应商缓存失效。
 
 > 提示

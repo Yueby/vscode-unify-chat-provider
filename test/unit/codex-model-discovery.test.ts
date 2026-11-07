@@ -9,6 +9,7 @@ const network = vi.hoisted(() => ({
   options: [] as unknown[],
   errors: vi.fn<(error: unknown) => void>(),
   diagnostics: vi.fn<(...args: unknown[]) => void>(),
+  clientVersion: vi.fn<() => Promise<string>>(),
 }));
 
 vi.mock('vscode', () => {
@@ -51,6 +52,10 @@ vi.mock('../../src/logger', () => ({
     providerResponseMeta(): void {}
     providerResponseChunk(): void {}
   },
+}));
+
+vi.mock('../../src/client/openai/codex-model-version', () => ({
+  getCodexModelsClientVersion: () => network.clientVersion(),
 }));
 
 vi.mock('../../src/client/utils', async (importOriginal) => ({
@@ -115,6 +120,7 @@ beforeEach(() => {
   network.options.length = 0;
   network.errors.mockReset();
   network.diagnostics.mockReset();
+  network.clientVersion.mockReset().mockResolvedValue('0.167.0');
   vi.spyOn(console, 'info').mockImplementation(network.diagnostics);
   network.fetch.mockImplementation(async () => catalog());
 });
@@ -137,7 +143,7 @@ describe('authenticated Codex model discovery', () => {
     const headers = new Headers(init?.headers);
     expect(url.origin + url.pathname).toBe('https://chatgpt.com/backend-api/codex/models');
     expect(url.searchParams.get('client_version')).toBe('0.167.0');
-    expect(headers.get('user-agent')).toContain(`codex-tui/${url.searchParams.get('client_version')}`);
+    expect(headers.get('user-agent')).toBe(`codex-tui/${url.searchParams.get('client_version')}`);
     expect(headers.get('authorization')).toBe('Bearer expired-token');
     expect(headers.get('chatgpt-account-id')).toBe('account-a');
     expect(headers.get('accept')).toBe('application/json');

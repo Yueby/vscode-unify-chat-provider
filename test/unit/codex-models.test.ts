@@ -4,6 +4,7 @@ import type { ModelConfig, ProviderConfig } from '../../src/types';
 
 const state = vi.hoisted(() => ({
   getAvailableModels: vi.fn<(...args: unknown[]) => Promise<ModelConfig[]>>(),
+  fetch: vi.fn<typeof fetch>(),
 }));
 
 vi.mock('vscode', () => ({
@@ -24,13 +25,17 @@ vi.mock('../../src/utils', () => ({
 }));
 
 vi.mock('../../src/client/utils', () => ({
-  createCustomFetch: () => vi.fn(),
-  getToken: () => undefined,
+  createCustomFetch: () => state.fetch,
+  getToken: (credential: AuthTokenInfo) => credential.kind === 'token' ? credential.token : undefined,
 }));
 
 vi.mock('../../src/client/openai/responses-client', () => ({
   OpenAIResponsesProvider: class OpenAIResponsesProvider {
     constructor(protected readonly config: ProviderConfig) {}
+
+    protected buildHeaders(_sessionId: string, credential?: AuthTokenInfo): Record<string, string> {
+      return credential?.kind === 'token' ? { Authorization: `Bearer ${credential.token}` } : {};
+    }
 
     async getAvailableModels(...args: unknown[]): Promise<ModelConfig[]> {
       return state.getAvailableModels(...args);
@@ -52,6 +57,7 @@ function createConfig(auth: ProviderConfig['auth']): ProviderConfig {
 
 beforeEach(() => {
   state.getAvailableModels.mockReset();
+  state.fetch.mockReset();
 });
 
 describe('OpenAI Codex model list', () => {
@@ -80,6 +86,34 @@ describe('OpenAI Codex model list', () => {
       refreshCredential,
       controller.signal,
     );
+  });
+
+  it('follows the original release-to-catalog sequence with no credentials on the public request', async () => {
+    state.fetch.mockResolvedValueOnce(Response.json({
+      tag_name: 'rust-v0.168.0', draft: false, prerelease: false,
+    })).mockResolvedValueOnce(Response.json({ models: [{
+      slug: 'account-model', visibility: 'list', context_window: 100000,
+      default_reasoning_level: 'medium', supported_reasoning_levels: [{ effort: 'medium' }],
+    }] }));
+    const provider = new OpenAICodexProvider(createConfig({ method: 'openai-codex', bindingId: 'binding-1' }));
+    const models = await provider.getAvailableModels({
+      kind: 'token', token: 'oauth-sentinel', authContext: {
+        method: 'openai-codex', bindingId: 'binding-1', sessionId: 'session', revision: 1, accountId: 'account',
+      },
+    });
+    expect(models.map((model) => model.id)).toEqual(['account-model']);
+    expect(state.fetch).toHaveBeenCalledTimes(2);
+    const [publicUrl, publicInit] = state.fetch.mock.calls[0];
+    expect(publicUrl).toBe('https://api.github.com/repos/openai/codex/releases/latest');
+    const publicHeaders = new Headers(publicInit?.headers);
+    expect(Array.from(publicHeaders.keys()).sort()).toEqual(['accept', 'user-agent']);
+    expect(publicHeaders.has('authorization')).toBe(false);
+    const [modelUrl, modelInit] = state.fetch.mock.calls[1];
+    expect(new URL(modelUrl.toString()).searchParams.get('client_version')).toBe('0.168.0');
+    const modelHeaders = new Headers(modelInit?.headers);
+    expect(modelHeaders.get('user-agent')).toBe('codex-tui/0.168.0');
+    expect(modelHeaders.get('authorization')).toBe('Bearer oauth-sentinel');
+    expect(modelHeaders.get('chatgpt-account-id')).toBe('account');
   });
 
   it('requires credentials for authenticated ChatGPT model discovery', async () => {
