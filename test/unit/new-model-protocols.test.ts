@@ -117,6 +117,7 @@ async function requestBody(
   baseUrl: string,
   model: ModelConfig,
   type: ProviderConfig['type'] = 'openai-chat-completion',
+  messages: readonly vscode.LanguageModelChatRequestMessage[] = history,
 ): Promise<unknown> {
   const config: ProviderConfig = {
     name: 'New model protocol test', type, baseUrl, models: [],
@@ -127,7 +128,7 @@ async function requestBody(
     for await (const part of provider.streamChat(
       model.id,
       { ...model, stream: false },
-      history,
+      messages,
       { requestInitiator: 'test', toolMode: vscode.LanguageModelChatToolMode.Auto },
       { performance: { tts: Date.now(), ttf: 0, ttft: 0, tps: 0, tl: 0 } },
       { isCancellationRequested: false, onCancellationRequested: () => ({ dispose: () => undefined }) },
@@ -205,4 +206,119 @@ describe('New model request protocols', () => {
     const body = await requestBody('https://api.anthropic.com', model, 'anthropic');
     expect(body).toMatchObject({ output_config: { effort: 'xhigh' } });
   });
+});
+
+describe('Catalog model request serialization', () => {
+  const gptIds = ['gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-sol', 'gpt-6-luna'];
+  const openaiCases = gptIds.flatMap((id) => [
+    { id, type: 'openai-responses' as const },
+    { id, type: 'openai-chat-completion' as const },
+  ]);
+
+  it.each(openaiCases)('preserves max effort for $id over $type', async ({ id, type }) => {
+    const model = applyPresetTemplateSelections(mergeWithWellKnownModel({ id }), {
+      reasoningEffort: 'max',
+    });
+    const body = await requestBody('https://api.openai.com/v1', model, type);
+    expect(body).toMatchObject(type === 'openai-responses'
+      ? { model: id, reasoning: { effort: 'max' }, max_output_tokens: 128000 }
+      : { model: id, reasoning_effort: 'max', max_completion_tokens: 128000 });
+    expect(body).not.toHaveProperty('max_tokens');
+  });
+
+  it.each(openaiCases.filter(({ id }) => id !== 'gpt-6.1-sol'))(
+    'serializes the none preset for $id over $type', async ({ id, type }) => {
+      const model = applyPresetTemplateSelections(mergeWithWellKnownModel({ id }), {
+        reasoningEffort: 'none',
+      });
+      const body = await requestBody('https://api.openai.com/v1', model, type);
+      expect(body).toMatchObject(type === 'openai-responses'
+        ? { reasoning: { effort: 'none' } }
+        : { reasoning_effort: 'none' });
+    },
+  );
+
+  const claudeCases = ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5']
+    .flatMap((id) => ['low', 'medium', 'high', 'xhigh', 'max'].map((effort) => ({ id, effort })));
+  it.each(claudeCases)('sends adaptive $effort for $id', async ({ id, effort }) => {
+    const model = applyPresetTemplateSelections(mergeWithWellKnownModel({ id }), {
+      reasoningEffort: effort,
+    });
+    const body = await requestBody('https://api.anthropic.com', model, 'anthropic');
+    expect(body).toMatchObject({
+      model: id, max_tokens: 128000,
+      thinking: { type: 'adaptive' }, output_config: { effort },
+    });
+    const betas = network.requests[0]?.headers.get('anthropic-beta') ?? '';
+    expect(betas).not.toContain('context-1m-2025-08-07');
+    expect(betas).not.toContain('mid-conversation-tool-changes-2026-07-01');
+    expect(betas).not.toContain('interleaved-thinking-2025-05-14');
+  });
+
+  it.each(['https://api.minimaxi.com/anthropic', 'https://api.minimax.io/anthropic']
+    .flatMap((baseUrl) => ['xhigh', 'max'].map((effort) => ({ baseUrl, effort }))))(
+    'sends stable MiniMax $effort on $baseUrl', async ({ baseUrl, effort }) => {
+      const model = applyPresetTemplateSelections(mergeWithWellKnownModel({
+        id: 'MiniMax-M3.1-Flash',
+      }), { reasoningEffort: effort });
+      const body = await requestBody(baseUrl, model, 'anthropic');
+      expect(body).toMatchObject({
+        model: 'MiniMax-M3.1-Flash', max_tokens: 131072,
+        output_config: { effort },
+      });
+      // M3.1 Flash enables adaptive thinking by default when this field is omitted.
+      expect(body).not.toHaveProperty('thinking');
+    },
+  );
+
+  it.each(
+    ['api.kimi.com', 'api.kimi.ai'].flatMap((host) =>
+      ['/coding', '/coding/', '/coding/v1', '/coding/v1/'].flatMap((path) =>
+        ['k3.1-pro', 'k3.1-pro-highspeed', 'k3-256k']
+          .map((id) => ({ baseUrl: `https://${host}${path}`, id })),
+      ),
+    ),
+  )(
+    'preserves K3 effort and wire ID for $id on $baseUrl', async ({ baseUrl, id }) => {
+      const provider: ProviderConfig = {
+        name: 'Kimi Coding', type: 'openai-chat-completion', baseUrl, models: [],
+      };
+      const model = applyPresetTemplateSelections(mergeWithWellKnownModel({ id }, provider), {
+        reasoningEffort: 'low',
+      });
+      const body = await requestBody(baseUrl, model);
+      expect(body).toMatchObject({ model: id, reasoning_effort: 'low', max_completion_tokens: 131072 });
+      expect(body).not.toHaveProperty('thinking');
+      expect(new URL(network.requests[0].url).pathname).toBe('/coding/v1/chat/completions');
+    },
+  );
+
+  it.each(['https://api.moonshot.cn', 'https://api.moonshot.ai']
+    .flatMap((baseUrl) => ['kimi-k3.1-pro', 'kimi-k3.1-pro-highspeed']
+      .map((id) => ({ baseUrl, id }))))(
+    'sends the public Kimi default effort for $id on $baseUrl', async ({ baseUrl, id }) => {
+      const model = mergeWithWellKnownModel({ id });
+      expect(await requestBody(baseUrl, model)).toMatchObject({
+        model: id, reasoning_effort: 'max', max_completion_tokens: 131072,
+      });
+    },
+  );
+
+  it.each(['high', 'medium', 'low'])(
+    'serializes Gemini Argon thinkingLevel $effort', async (effort) => {
+      const model = applyPresetTemplateSelections(mergeWithWellKnownModel({ id: 'gemini-4-argon' }), {
+        reasoningEffort: effort,
+      });
+      const body = await requestBody(
+        'https://generativelanguage.googleapis.com', model, 'google-ai-studio', history.slice(0, 1),
+      );
+      expect(body).toMatchObject({
+        generationConfig: {
+          maxOutputTokens: 65536,
+          thinkingConfig: { includeThoughts: true, thinkingLevel: effort.toUpperCase() },
+        },
+      });
+      expect(body).not.toHaveProperty('generationConfig.thinkingConfig.thinkingBudget');
+    },
+  );
 });
