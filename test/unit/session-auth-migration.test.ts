@@ -671,6 +671,30 @@ describe('session auth startup migration', () => {
     expect(secrets.getLocalAuthEnvelope(String(auth['bindingId']))).toBeUndefined();
   });
 
+  it('preserves shared configuration when a new extension identity has an empty secret store', async () => {
+    const originalStorage = new MemorySecretStorage();
+    const originalSecrets = new SecretStore(originalStorage);
+    const ref = createSecretRef();
+    await originalSecrets.setOAuth2Token(ref, codexToken('original-identity'));
+    const config = new RawEndpointStore([rawProvider(ref)]);
+    await migrateSessionAuthState({ configStore: config, secretStore: originalSecrets });
+    const beforeConfig = stableStringify(config.rawEndpoints);
+    const beforeOriginalSecrets = Array.from(originalStorage.values.entries());
+    const bindingId = migratedAuth(config)['bindingId'];
+    if (typeof bindingId !== 'string') throw new Error('Expected binding ID');
+
+    const personalStorage = new MemorySecretStorage();
+    const personalSecrets = new SecretStore(personalStorage);
+    await migrateSessionAuthState({ configStore: config, secretStore: personalSecrets });
+
+    expect(stableStringify(config.rawEndpoints)).toBe(beforeConfig);
+    expect(config.rawEndpoints).toHaveLength(1);
+    expect(migratedAuth(config)['bindingId']).toBe(bindingId);
+    expect(personalSecrets.getLocalAuthContext(descriptor, { method: 'openai-codex', bindingId })).toBeUndefined();
+    expect(personalStorage.values.size).toBe(0);
+    expect(Array.from(originalStorage.values.entries())).toEqual(beforeOriginalSecrets);
+  });
+
   it('derives the same binding while keeping device tokens isolated', async () => {
     const ref = createSecretRef();
     const storageA = new MemorySecretStorage();

@@ -20,7 +20,7 @@ Integrate multiple LLM API providers into VS Code's GitHub Copilot Chat using th
 <br>
 <p align="center">
 <span>English</span> |
-<a href="https://github.com/smallmain/vscode-unify-chat-provider/blob/main/README_zh-CN.md">简体中文</a>
+<a href="README_zh-CN.md">简体中文</a>
 </p>
 
 ## Features
@@ -39,8 +39,9 @@ Integrate multiple LLM API providers into VS Code's GitHub Copilot Chat using th
 ## Installation
 
 - Requires VS Code 1.115.0 or later.
-- Search for [Unify Chat Provider](https://marketplace.visualstudio.com/items?itemName=SmallMain.vscode-unify-chat-provider) in the VS Code Extension Marketplace and install it.
-- Download the latest `.vsix` file from [GitHub Releases](https://github.com/smallmain/vscode-unify-chat-provider/releases), then install it in VS Code via `Install from VSIX...` or by dragging it into the Extensions view.
+- This maintained fork uses the extension ID `Yueby.vscode-unify-chat-provider`. Install its locally built `.vsix` via `Extensions: Install from VSIX...` or by dragging it into the Extensions view. Source and release information are in [this repository](https://github.com/Yueby/vscode-unify-chat-provider).
+- Disable the upstream `SmallMain.vscode-unify-chat-provider` extension before activating this fork: they share commands, the model vendor, and the `unifyChatProvider` settings section. Provider/model settings are reused; sign in again or re-enter securely stored API keys for this extension identity.
+- Explicit OAuth2 redirect URIs must target the new identity and match the OAuth server registration. Optional Proposed API permissions are also identity-scoped; enable them explicitly when needed.
 
 ## Sponsors
 
@@ -787,7 +788,7 @@ Supports importing provider configs via VS Code URI.
 Example:
 
 ```
-vscode://SmallMain.vscode-unify-chat-provider/import-config?config=<input>
+vscode://Yueby.vscode-unify-chat-provider/import-config?config=<input>
 ```
 
 `<input>` supports the same formats as in [Import and Export](#import-and-export).
@@ -799,7 +800,7 @@ You can add query parameters to override certain fields in the imported config.
 Example:
 
 ```
-vscode://SmallMain.vscode-unify-chat-provider/import-config?config=<input>&auth={"method":"api-key","apiKey":"my-api-key"}
+vscode://Yueby.vscode-unify-chat-provider/import-config?config=<input>&auth={"method":"api-key","apiKey":"my-api-key"}
 ```
 
 The import will override the `auth` field before importing.
@@ -809,7 +810,7 @@ The import will override the `auth` field before importing.
 If you are a developer for an LLM provider, you can add a link like the following on your website so users can add your model to this extension with one click:
 
 ```
-<a href="vscode://SmallMain.vscode-unify-chat-provider/import-config?config=eyJ0eXBlIjoi...">Add to Unify Chat Provider</a>
+<a href="vscode://Yueby.vscode-unify-chat-provider/import-config?config=eyJ0eXBlIjoi...">Add to Unify Chat Provider</a>
 ```
 
 ## Cloud Sync Compatibility

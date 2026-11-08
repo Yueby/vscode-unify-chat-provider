@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { EXTENSION_ID } from "../../extension-identity";
 import {
   createFimGhostTextEngine,
   positionAt as ghostTextPositionAt,
@@ -169,9 +170,7 @@ function normalizeInsertSpaces(
 }
 
 function isPreReleaseBuild(): boolean {
-  const packageJson: unknown = vscode.extensions.getExtension(
-    "SmallMain.vscode-unify-chat-provider",
-  )?.packageJSON;
+  const packageJson: unknown = vscode.extensions.getExtension(EXTENSION_ID)?.packageJSON;
   if (typeof packageJson !== "object" || packageJson === null) {
     return false;
   }

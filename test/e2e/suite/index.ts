@@ -4,7 +4,7 @@ import { writeFile } from "node:fs/promises";
 import * as vscode from "vscode";
 
 const EXTENSION_ID = process.env["UCP_E2E_EXTENSION_ID"]
-  ?? "SmallMain.vscode-unify-chat-provider";
+  ?? "Yueby.vscode-unify-chat-provider";
 const FAKE_LANGUAGE_MODEL_EXTENSION_ID = "ucp-e2e.fake-language-model";
 const FAKE_NES_MODEL = { vendor: "ucp-e2e-fake", id: "controlled" } as const;
 const CURSOR_PREDICTION_SYSTEM_MESSAGE_PREFIX =

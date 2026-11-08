@@ -39,8 +39,9 @@ Unify Chat Provider
 ## 安装
 
 - 需要 VS Code 1.115.0 或更高版本。
-- 在 VS Code 扩展市场搜索 [Unify Chat Provider](https://marketplace.visualstudio.com/items?itemName=SmallMain.vscode-unify-chat-provider) 并安装。
-- 通过 [GitHub Releases](https://github.com/smallmain/vscode-unify-chat-provider/releases) 下载最新的 `.vsix` 文件，在 VS Code 中通过 `从 VSIX 安装扩展...` 或拖动到扩展面板进行安装。
+- 此维护分支使用扩展 ID `Yueby.vscode-unify-chat-provider`。将本地构建的 `.vsix` 通过 `扩展: 从 VSIX 安装...` 或拖动到扩展面板安装；源码及交付信息见[本仓库](https://github.com/Yueby/vscode-unify-chat-provider)。
+- 激活个人版前，请先停用上游 `SmallMain.vscode-unify-chat-provider`：两者共用命令、模型 vendor 和 `unifyChatProvider` 配置段。提供商与模型设置可沿用，登录和安全存储的 API key 需按新扩展身份重新配置。
+- 显式配置的 OAuth2 回调 URI 应指向新身份，并与服务端登记一致。可选 Proposed API 授权同样按扩展 ID 区分，需要时再明确启用。
 
 
 ## 赞助商
@@ -788,7 +789,7 @@ Zed 编辑器使用自研的 Zeta 系列模型，这里推荐两种方式添加�
 例如：
 
 ```
-vscode://SmallMain.vscode-unify-chat-provider/import-config?config=<input>
+vscode://Yueby.vscode-unify-chat-provider/import-config?config=<input>
 ```
 
 其中 `<input>` 支持格式与 [导入与导出](#导入与导出) 中导入支持的格式相同。
@@ -800,7 +801,7 @@ vscode://SmallMain.vscode-unify-chat-provider/import-config?config=<input>
 例如：
 
 ```
-vscode://SmallMain.vscode-unify-chat-provider/import-config?config=<input>&auth={"method":"api-key","apiKey":"my-api-key"}
+vscode://Yueby.vscode-unify-chat-provider/import-config?config=<input>&auth={"method":"api-key","apiKey":"my-api-key"}
 ```
 
 导入时将会覆盖配置中的 `auth` 字段再导入。
@@ -810,7 +811,7 @@ vscode://SmallMain.vscode-unify-chat-provider/import-config?config=<input>&auth=
 如果你是某个模型供应商的开发者，可以通过在网站上添加类似如下的链接，方便用户一键将你的模型添加到扩展中：
 
 ```
-<a href="vscode://SmallMain.vscode-unify-chat-provider/import-config?config=eyJ0eXBlIjoi...">Add to Unify Chat Provider</a>
+<a href="vscode://Yueby.vscode-unify-chat-provider/import-config?config=eyJ0eXBlIjoi...">Add to Unify Chat Provider</a>
 ```
 
 ## 云同步兼容

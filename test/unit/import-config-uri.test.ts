@@ -194,6 +194,21 @@ describe('ImportConfigUriHandler auth validation', () => {
     ).toBeUndefined();
   });
 
+  it('opens the provider form for the personal extension import URI', async () => {
+    state.decoded = {
+      type: 'openai-chat-completion', name: 'personal-uri',
+      baseUrl: 'https://api.example.test/v1', models: [],
+    };
+    const configStore = new ConfigStore();
+    const handler = new ImportConfigUriHandler(configStore, new SecretStore(new MemorySecretStorage()));
+    await handler.handleUri(vscodeApi.Uri.parse(
+      'vscode://Yueby.vscode-unify-chat-provider/import-config?config=value',
+    ));
+    expect(state.runUiStack).toHaveBeenCalledOnce();
+    expect(state.showErrorMessage).not.toHaveBeenCalled();
+    configStore.dispose();
+  });
+
   it('rejects malformed auth without opening the provider form', async () => {
     state.decoded = {
       type: 'openai-chat-completion',

@@ -7,7 +7,7 @@
         {
             "args": [
                 "--extensionDevelopmentPath=${workspaceFolder}",
-                "--enable-proposed-api=SmallMain.vscode-unify-chat-provider"
+                "--enable-proposed-api=Yueby.vscode-unify-chat-provider"
             ],
             "name": "Debug",
             "outFiles": [

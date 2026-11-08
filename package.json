@@ -64,10 +64,10 @@
     "免费聊天",
     "代码补全"
   ],
-  "publisher": "SmallMain",
+  "publisher": "Yueby",
   "icon": "icon.png",
-  "repository": "github:smallmain/vscode-unify-chat-provider",
-  "bugs": "https://github.com/smallmain/vscode-unify-chat-provider/issues",
+  "repository": "github:Yueby/vscode-unify-chat-provider",
+  "bugs": "https://github.com/Yueby/vscode-unify-chat-provider/issues",
   "author": "SmallMain",
   "sponsor": {
     "url": "https://github.com/smallmain/sponsors"

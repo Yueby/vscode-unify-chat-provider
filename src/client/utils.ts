@@ -1,4 +1,5 @@
 import { getBaseModelId } from '../model-id-utils';
+import { EXTENSION_ID } from '../extension-identity';
 import type { ProviderHttpLogger, RequestLogger } from '../logger';
 import { t } from '../i18n';
 import * as vscode from 'vscode';
@@ -137,7 +138,6 @@ export function matchModelFamily(family: string, patterns: string[]): boolean {
   return patterns.some((v) => family.toLowerCase().startsWith(v.toLowerCase()));
 }
 
-const EXTENSION_ID = 'SmallMain.vscode-unify-chat-provider';
 let cachedUnifiedUserAgent: string | undefined;
 
 export function getUnifiedUserAgent(): string {

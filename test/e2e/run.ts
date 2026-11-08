@@ -601,7 +601,7 @@ async function main(): Promise<void> {
       const proposalArgs =
         mode === "enabled"
           ? [
-              "--enable-proposed-api=SmallMain.vscode-unify-chat-provider",
+              "--enable-proposed-api=Yueby.vscode-unify-chat-provider",
               "--enable-proposed-api=ucp-e2e.fake-language-model",
             ]
           : [];
@@ -618,7 +618,7 @@ async function main(): Promise<void> {
           UCP_E2E_PROPOSED_MODE: mode,
           UCP_E2E_EXTENSION_ID: mode === "disabled"
             ? DISABLED_PROPOSAL_EXTENSION_ID
-            : "SmallMain.vscode-unify-chat-provider",
+            : "Yueby.vscode-unify-chat-provider",
         },
         launchArgs: [
           fixtureWorkspace,
@@ -663,7 +663,7 @@ async function main(): Promise<void> {
             `--user-data-dir=${userDataDir}`,
             `--extensions-dir=${path.join(deviceRoot, "extensions")}`,
             "--disable-extensions",
-            "--enable-proposed-api=SmallMain.vscode-unify-chat-provider",
+            "--enable-proposed-api=Yueby.vscode-unify-chat-provider",
             "--skip-welcome",
             "--skip-release-notes",
           ],
