@@ -1345,5 +1345,17 @@
   "OrcaRouter": "OrcaRouter",
   "Official API with automatic model endpoint routing": "Official API with automatic model endpoint routing",
   "OpenCode Go": "OpenCode Go",
-  "OpenCode Zen": "OpenCode Zen"
+  "OpenCode Zen": "OpenCode Zen",
+  "A new version of Unify Chat Provider is available: v{0}": "A new version of Unify Chat Provider is available: v{0}",
+  "Install Update": "Install Update",
+  "Release Notes": "Release Notes",
+  "Downloading and verifying update...": "Downloading and verifying update...",
+  "No published update available.": "No published update available.",
+  "Update installed (v{0}). Reload to apply changes.": "Update installed (v{0}). Reload to apply changes.",
+  "Reload Window": "Reload Window",
+  "Update check failed: network connection error.": "Update check failed: network connection error.",
+  "Update check failed: invalid release format or manifest.": "Update check failed: invalid release format or manifest.",
+  "Update check failed: SHA256 checksum mismatch.": "Update check failed: SHA256 checksum mismatch.",
+  "Update check failed: extension package verification failed.": "Update check failed: extension package verification failed.",
+  "Update installation failed. Please try again later.": "Update installation failed. Please try again later."
 }

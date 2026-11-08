@@ -57,6 +57,7 @@ import {
   type ProposedApiCapabilities,
 } from './proposed-api/capabilities';
 import { canUseLanguageModelThinkingPart } from './proposed-api/thinking';
+import { registerReleaseUpdates } from './update/runtime';
 import {
   registerProposedApiEnableCommand,
   scheduleProposedApiStartupReminder,
@@ -483,6 +484,11 @@ export async function activate(
 
   // Register commands
   registerCommands(context, configStore, secretStore, uriHandler);
+  registerReleaseUpdates(context);
+  if (context.extensionMode === vscode.ExtensionMode.Test) {
+    const { registerUpdateTestCommands } = await import('./update/test-control');
+    registerUpdateTestCommands(context);
+  }
   registerProposedApiEnableCommand(context);
   registerCommitMessageGeneration(context, canUseSystemMessage);
 

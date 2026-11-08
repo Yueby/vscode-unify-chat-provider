@@ -2,6 +2,7 @@ import * as assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import * as vscode from "vscode";
+import { runGitHubUpdateE2E } from "./github-update";
 
 const EXTENSION_ID = process.env["UCP_E2E_EXTENSION_ID"]
   ?? "Yueby.vscode-unify-chat-provider";
@@ -3192,6 +3193,10 @@ export async function run(): Promise<void> {
 
   await activateWithPendingCopilot();
   assert.equal(extension.isActive, true, "Extension should activate");
+
+  if (process.env["UCP_E2E_PROPOSED_MODE"] === "enabled") {
+    await runGitHubUpdateE2E();
+  }
 
   const commands = await vscode.commands.getCommands(true);
   assert.ok(

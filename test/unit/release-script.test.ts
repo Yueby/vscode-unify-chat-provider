@@ -1,4 +1,5 @@
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   chmod,
   mkdir,
@@ -8,7 +9,9 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import JSZip from 'jszip';
 import { afterEach, describe, expect, it } from 'vitest';
 
 type TestRepository = {
@@ -24,7 +27,7 @@ type ToolCall = {
 };
 
 const releaseScript = resolve(process.cwd(), 'scripts/release.mts');
-const realVsce = resolve(process.cwd(), 'node_modules/.bin/vsce');
+const realVsce = resolve(process.cwd(), 'node_modules/@vscode/vsce/vsce');
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
@@ -36,7 +39,7 @@ afterEach(async () => {
 });
 
 describe('release script coordination', () => {
-  it.skipIf(process.platform === 'win32')(
+  it(
     'stops before external publishing when origin/main advances before the atomic push',
     async () => {
       const repository = await createRepository();
@@ -78,7 +81,7 @@ describe('release script coordination', () => {
     60_000,
   );
 
-  it.skipIf(process.platform === 'win32')(
+  it(
     'reconciles ambiguous external responses by matching remote VSIX hashes',
     async () => {
       const repository = await createRepository();
@@ -135,7 +138,16 @@ describe('release script coordination', () => {
       const calls = await readToolCalls(callLog);
       expect(calls.some((call) => call.tool === 'vsce' && call.args[0] === 'publish')).toBe(true);
       expect(calls.some((call) => call.tool === 'gh' && call.args[1] === 'create')).toBe(true);
-      expect(calls.some((call) => call.tool === 'gh' && call.args[1] === 'upload')).toBe(true);
+      const assetPath = join(repository.release, 'test-extension-1.1.0.vsix');
+      expect(calls.filter((call) => call.tool === 'gh' && call.args[1] === 'upload')
+        .map((call) => call.args[3])).toEqual([assetPath, `${assetPath}.sha256`]);
+      await expectChecksum(assetPath);
+      expect(JSON.parse(await readFile(githubState, 'utf8'))).toMatchObject({
+        assets: [
+          { name: 'test-extension-1.1.0.vsix' },
+          { name: 'test-extension-1.1.0.vsix.sha256' },
+        ],
+      });
     },
     60_000,
   );
@@ -203,6 +215,198 @@ describe('release script coordination', () => {
     );
   }, 60_000);
 });
+
+describe('GitHub release checksums', () => {
+  it('uploads the VSIX and its standard ASCII SHA-256 sidecar to a draft release', async () => {
+    const fixture = await createGitHubFixture();
+    const result = runRelease(fixture.repository.release, fixture.args, fixture.env);
+
+    expect(`${result.stderr}\n${result.stdout}`).not.toContain('failed (attempt');
+    expect(result.status).toBe(0);
+    await expectChecksum(fixture.assetPath);
+    const calls = await readToolCalls(fixture.callLog);
+    expect(gitHubMutations(calls).map((call) => call.args[1])).toEqual([
+      'create', 'upload', 'upload',
+    ]);
+    expect(gitHubMutations(calls)[0]?.args).toContain('--draft');
+    expect(gitHubMutations(calls).some((call) => call.args.includes('--clobber'))).toBe(false);
+    expect(JSON.parse(await readFile(fixture.githubState, 'utf8'))).toMatchObject({
+      isDraft: true,
+      assets: [
+        { name: basename(fixture.assetPath), digest: `sha256:${await sha256(fixture.assetPath)}` },
+        { name: `${basename(fixture.assetPath)}.sha256`, digest: `sha256:${await sha256(`${fixture.assetPath}.sha256`)}` },
+      ],
+    });
+  }, 60_000);
+
+  it('resumes an existing VSIX by uploading only its missing checksum, then remains idempotent', async () => {
+    const fixture = await createGitHubFixture();
+    await writeGitHubState(fixture, [
+      { name: basename(fixture.assetPath), digest: `sha256:${await sha256(fixture.assetPath)}` },
+    ]);
+    const args = [...fixture.args, '--skip-github-create'];
+    const result = runRelease(fixture.repository.release, args, fixture.env);
+
+    expect(result.status).toBe(0);
+    await expectChecksum(fixture.assetPath);
+    expect(gitHubMutations(await readToolCalls(fixture.callLog)).map((call) => call.args))
+      .toEqual([['release', 'upload', 'v1.0.0', `${fixture.assetPath}.sha256`]]);
+
+    await writeFile(fixture.callLog, '', 'utf8');
+    const resumed = runRelease(fixture.repository.release, args, fixture.env);
+    expect(resumed.status).toBe(0);
+    expect(gitHubMutations(await readToolCalls(fixture.callLog))).toEqual([]);
+  }, 60_000);
+
+  it.each(['conflicting', 'unverifiable'])('refuses an existing %s checksum without overwriting it', async (kind) => {
+    const fixture = await createGitHubFixture();
+    const assets = [
+      { name: basename(fixture.assetPath), digest: `sha256:${await sha256(fixture.assetPath)}` },
+      { name: `${basename(fixture.assetPath)}.sha256`, digest: kind === 'conflicting' ? `sha256:${'0'.repeat(64)}` : null },
+    ];
+    await writeGitHubState(fixture, assets);
+    const before = await readFile(fixture.githubState, 'utf8');
+    const result = runRelease(fixture.repository.release, fixture.args, fixture.env);
+
+    expect(result.status).not.toBe(0);
+    expect(`${result.stderr}\n${result.stdout}`).toContain(
+      kind === 'conflicting' ? 'Refusing to treat this as an idempotent resume' : 'Refusing to overwrite it',
+    );
+    expect(`${result.stderr}\n${result.stdout}`).toContain(`${basename(fixture.assetPath)}.sha256`);
+    expect(gitHubMutations(await readToolCalls(fixture.callLog))).toEqual([]);
+    expect(await readFile(fixture.githubState, 'utf8')).toBe(before);
+  }, 60_000);
+
+  it('still refuses a conflicting VSIX before uploading its checksum', async () => {
+    const fixture = await createGitHubFixture();
+    await writeGitHubState(fixture, [
+      { name: basename(fixture.assetPath), digest: `sha256:${'0'.repeat(64)}` },
+    ]);
+    const result = runRelease(fixture.repository.release, fixture.args, fixture.env);
+    expect(result.status).not.toBe(0);
+    expect(`${result.stderr}\n${result.stdout}`).toContain('Refusing to treat this as an idempotent resume');
+    expect(gitHubMutations(await readToolCalls(fixture.callLog))).toEqual([]);
+  }, 60_000);
+
+  it('keeps tag target validation when creation is skipped', async () => {
+    const fixture = await createGitHubFixture();
+    await writeGitHubState(fixture, [], 'wrong-target');
+    const result = runRelease(fixture.repository.release, [...fixture.args, '--skip-github-create'], fixture.env);
+    expect(result.status).not.toBe(0);
+    expect(`${result.stderr}\n${result.stdout}`).toContain('target');
+    expect(gitHubMutations(await readToolCalls(fixture.callLog))).toEqual([]);
+  }, 60_000);
+
+  it('requires an existing release when creation is skipped', async () => {
+    const fixture = await createGitHubFixture();
+    const result = runRelease(fixture.repository.release, [...fixture.args, '--skip-github-create'], fixture.env);
+    expect(result.status).not.toBe(0);
+    expect(`${result.stderr}\n${result.stdout}`).toContain('does not exist and creation was skipped');
+    expect(gitHubMutations(await readToolCalls(fixture.callLog))).toEqual([]);
+  }, 60_000);
+
+  it.each([false, true])('does not write checksum files during a resume dry-run (existing: %s)', async (existing) => {
+    const fixture = await createGitHubFixture();
+    const checksumPath = `${fixture.assetPath}.sha256`;
+    if (existing) await writeFile(checksumPath, 'preserved checksum\n', 'ascii');
+    const before = runOk('git', ['status', '--porcelain'], fixture.repository.release).stdout;
+    const result = runRelease(fixture.repository.release, [...fixture.args, '--dry-run'], fixture.env);
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('Dry-run: no mutating commands executed.');
+    expect(runOk('git', ['status', '--porcelain'], fixture.repository.release).stdout).toBe(before);
+    if (existing) {
+      expect(await readFile(checksumPath, 'ascii')).toBe('preserved checksum\n');
+    } else {
+      await expect(readFile(checksumPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    }
+    await expect(readFile(fixture.callLog)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 60_000);
+
+  it.each([false, true])('skips checksum generation and upload when upload is skipped (skip create: %s)', async (skipCreate) => {
+    const fixture = await createGitHubFixture();
+    // Creation-only mode must not even require the local VSIX.
+    await rm(fixture.assetPath);
+    const args = [...fixture.args, '--skip-github-upload'];
+    if (skipCreate) args.push('--skip-github-create');
+    const result = runRelease(fixture.repository.release, args, fixture.env);
+
+    expect(result.status).toBe(0);
+    await expect(readFile(`${fixture.assetPath}.sha256`)).rejects.toMatchObject({ code: 'ENOENT' });
+    if (skipCreate) {
+      await expect(readFile(fixture.callLog)).rejects.toMatchObject({ code: 'ENOENT' });
+    } else {
+      expect(gitHubMutations(await readToolCalls(fixture.callLog)).map((call) => call.args[1]))
+        .toEqual(['create']);
+    }
+  }, 60_000);
+
+  it('preserves full-release collision checks before modifying repository files', async () => {
+    const fixture = await createGitHubFixture();
+    await writeGitHubState(fixture, []);
+    const head = runOk('git', ['rev-parse', 'HEAD'], fixture.repository.release).stdout;
+    const status = runOk('git', ['status', '--porcelain'], fixture.repository.release).stdout;
+    const result = runRelease(fixture.repository.release, [
+      '--yes', '--allow-dirty', '--version', '1.1.0', '--skip-publish',
+    ], fixture.env);
+
+    expect(result.status).not.toBe(0);
+    expect(`${result.stderr}\n${result.stdout}`).toContain('GitHub Release');
+    expect(runOk('git', ['rev-parse', 'HEAD'], fixture.repository.release).stdout).toBe(head);
+    expect(runOk('git', ['status', '--porcelain'], fixture.repository.release).stdout).toBe(status);
+    expect(gitHubMutations(await readToolCalls(fixture.callLog))).toEqual([]);
+  }, 60_000);
+});
+
+async function sha256(path: string): Promise<string> {
+  return createHash('sha256').update(await readFile(path)).digest('hex');
+}
+
+async function expectChecksum(assetPath: string): Promise<void> {
+  const content = await readFile(`${assetPath}.sha256`);
+  expect(content.toString('ascii')).toBe(`${await sha256(assetPath)}  ${basename(assetPath)}\n`);
+  expect(content.every((byte) => byte < 128)).toBe(true);
+}
+
+function gitHubMutations(calls: ToolCall[]): ToolCall[] {
+  return calls.filter((call) => call.tool === 'gh' && ['create', 'upload'].includes(call.args[1] ?? ''));
+}
+
+async function createGitHubFixture() {
+  const repository = await createRepository();
+  const toolsDirectory = join(repository.root, 'tools');
+  const callLog = join(repository.root, 'tool-calls.jsonl');
+  const githubState = join(repository.root, 'github-release.json');
+  const notesPath = join(repository.root, 'notes.md');
+  const notes = 'Test release notes.\n';
+  await mkdir(toolsDirectory, { recursive: true });
+  await installFakeTools(toolsDirectory);
+  await writeFile(notesPath, notes, 'utf8');
+  const assetPath = join(repository.release, 'test-extension-1.0.0.vsix');
+  const archive = new JSZip();
+  archive.file('extension/package.json', await readFile(join(repository.release, 'package.json')));
+  await writeFile(assetPath, await archive.generateAsync({ type: 'nodebuffer' }));
+  const targetCommitish = runOk('git', ['rev-parse', 'HEAD'], repository.release).stdout.trim();
+  return {
+    repository, callLog, githubState, assetPath, targetCommitish, notes,
+    args: ['--yes', '--resume-from-tag', 'v1.0.0', '--skip-publish', '--draft', '--github-notes-file', notesPath],
+    env: {
+      ...process.env,
+      RELEASE_TEST_CALL_LOG: callLog,
+      RELEASE_TEST_GITHUB_STATE: githubState,
+    },
+  };
+}
+
+async function writeGitHubState(
+  fixture: Awaited<ReturnType<typeof createGitHubFixture>>,
+  assets: { name: string; digest: string | null }[],
+  targetCommitish = fixture.targetCommitish,
+): Promise<void> {
+  await writeFile(fixture.githubState, JSON.stringify({
+    tagName: 'v1.0.0', targetCommitish, name: 'v1.0.0', body: fixture.notes, isDraft: true, assets,
+  }), 'utf8');
+}
 
 async function createRepository(): Promise<TestRepository> {
   const root = await mkdtemp(join(tmpdir(), 'ucp-release-script-'));
@@ -305,7 +509,7 @@ if (args[0] === 'show') {
   process.exit(0);
 }
 if (args[0] === 'package') {
-  const packaged = spawnSync(process.env.REAL_VSCE, args, { cwd: process.cwd(), env: process.env, stdio: 'inherit' });
+  const packaged = spawnSync(process.execPath, [process.env.REAL_VSCE, ...args], { cwd: process.cwd(), env: process.env, stdio: 'inherit' });
   if (packaged.status !== 0) process.exit(packaged.status ?? 1);
   const rival = process.env.RELEASE_TEST_ADVANCE_REPO;
   if (rival) {
@@ -384,10 +588,14 @@ if (args[0] === 'release' && args[1] === 'upload') {
   if (state) {
     const asset = args[3];
     const metadata = JSON.parse(fs.readFileSync(state, 'utf8'));
-    metadata.assets = [{
+    if (metadata.assets.some((existing) => existing.name === path.basename(asset))) {
+      process.stderr.write('asset already exists; refusing to overwrite\\n');
+      process.exit(1);
+    }
+    metadata.assets.push({
       name: path.basename(asset),
       digest: 'sha256:' + crypto.createHash('sha256').update(fs.readFileSync(asset)).digest('hex'),
-    }];
+    });
     fs.writeFileSync(state, JSON.stringify(metadata));
   }
   process.exit(process.env.RELEASE_TEST_AMBIGUOUS_RESPONSES ? 1 : 0);
@@ -398,6 +606,23 @@ process.exit(0);
   );
   await chmod(vscePath, 0o755);
   await chmod(ghPath, 0o755);
+  // Route only the external publication tools to Node fixtures on every OS.
+  await writeFile(
+    join(directory, 'preload.mjs'),
+    `import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+import { fileURLToPath } from 'node:url';
+const spawn = childProcess.spawn;
+childProcess.spawn = (command, args, options) => {
+  if (command === 'gh' || command === 'vsce') {
+    return spawn(process.execPath, [fileURLToPath(new URL(command, import.meta.url)), ...args], options);
+  }
+  return spawn(command, args, options);
+};
+syncBuiltinESMExports();
+`,
+    'utf8',
+  );
 }
 
 function runRelease(
@@ -405,7 +630,11 @@ function runRelease(
   args: string[],
   env: NodeJS.ProcessEnv = process.env,
 ): SpawnSyncReturns<string> {
-  return run(process.execPath, [releaseScript, ...args], cwd, env);
+  const callLog = env.RELEASE_TEST_CALL_LOG;
+  const preloadArgs = callLog
+    ? ['--import', pathToFileURL(join(dirname(callLog), 'tools', 'preload.mjs')).href]
+    : [];
+  return run(process.execPath, [...preloadArgs, releaseScript, ...args], cwd, env);
 }
 
 function run(

@@ -44,6 +44,21 @@ Unify Chat Provider
 - 显式配置的 OAuth2 回调 URI 应指向新身份，并与服务端登记一致。可选 Proposed API 授权同样按扩展 ID 区分，需要时再明确启用。
 
 
+## GitHub Release 更新
+
+个人版从 `Yueby/vscode-unify-chat-provider` 检查正式 Release。生产实例启动后检查，每 24 小时最多一次，自动检查仅由主实例 leader 执行。可通过 `unifyChatProvider.updates.checkAutomatically` 关闭自动检查，也可随时执行 **Unify Chat Provider: 检查更新** 手动检查。开发及测试宿主不自动联网检查。
+
+发现更高的正式版本后，提供“安装更新”“更新日志”“稍后”。只有确认后才下载；必须有匹配的 `.sha256`，并校验 SHA-256 与 VSIX 的 publisher、name、version，然后交给 VS Code 原生安装器。下载及校验可取消，安装阶段不可取消。安装后单独询问是否重载，仅在你选择时重载。请求沿用应用级网络/代理配置，不携带提供商认证信息。更新代码要求启用 TLS 证书校验；代理证书校验被关闭或进程级 TLS 绕过时，更新请求会被阻止。SHA-256 用于完整性校验，不是独立的维护者签名，更新信任仍取决于仓库及其 Release 权限。
+
+发布约定：
+
+- 使用 `v8.14.1` 这类正式 tag，忽略 draft 与 prerelease。
+- 附件为 `vscode-unify-chat-provider-8.14.1.vsix` 和 `vscode-unify-chat-provider-8.14.1.vsix.sha256`。校验文件为 `<64位SHA-256>  <VSIX文件名>`，末尾换行。
+- 现有 Release 工作流默认仅走 GitHub 分发，Marketplace 发布关闭，并先生成草稿。VSIX 和校验文件都上传并核对后，再由你发布草稿。
+- 首个更新器版本：创建包含本实现的 `v8.14.1` tag，再运行 Release 工作流，选择 `mode=resume_from_tag`、`github_tag=v8.14.1`。核对附件后发布草稿。Full 模式会在当前 package.json 版本之上递增，适合后续版本。
+
+首次安装带更新器的 VSIX 仍需手动完成。运行或安装扩展本身不会创建 Release。
+
 ## 赞助商
 
 <table>

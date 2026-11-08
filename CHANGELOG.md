@@ -1,5 +1,20 @@
 # Changelog
 
+## v8.14.1 - Unreleased
+
+### Features
+- Maintain the fork under the independent `Yueby.vscode-unify-chat-provider` identity.
+- Check stable GitHub Releases automatically, with confirmed download, SHA-256 and package identity validation, native installation, and a separately confirmed reload.
+- Discover authenticated Codex account models and custom-endpoint models; expand verified multi-provider presets.
+
+### Fixes
+- Preserve Responses reasoning history, Zed Gemini schemas and thinking configuration, bounded stream retries, and DeepSeek output reservations.
+- Correct completed empty model catalogs and Windows build, URI, and completion lifecycle behavior.
+
+### Chores
+- Publish VSIX and SHA-256 assets together with reconciled resume support; default to reviewed GitHub draft releases.
+- Add update security, lifecycle, package-boundary and native installation tests; refresh patched dependencies.
+
 ## v8.14.0 - 2026-10-09
 
 ### Features

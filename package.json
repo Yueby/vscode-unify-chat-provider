@@ -2,7 +2,7 @@
   "name": "vscode-unify-chat-provider",
   "displayName": "%displayName%",
   "description": "%description%",
-  "version": "8.14.0",
+  "version": "8.14.1",
   "categories": [
     "AI",
     "Chat"
@@ -100,6 +100,10 @@
     ],
     "commands": [
       {
+        "command": "unifyChatProvider.checkForUpdates",
+        "title": "%command.checkForUpdates.title%"
+      },
+      {
         "command": "unifyChatProvider.addProvider",
         "title": "%command.addProvider.title%"
       },
@@ -183,6 +187,12 @@
     "configuration": {
       "title": "%configuration.title%",
       "properties": {
+        "unifyChatProvider.updates.checkAutomatically": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "%configuration.updates.checkAutomatically.description%"
+        },
         "unifyChatProvider.verbose": {
           "type": "boolean",
           "scope": "application",
@@ -2025,6 +2035,7 @@
     "@types/node": "^24",
     "@types/vscode": "1.115.0",
     "@types/ws": "^8.18.1",
+    "@types/yauzl": "3.4.0",
     "@vscode/test-electron": "^3.0.0",
     "@vscode/tree-sitter-wasm": "0.0.5-php.2",
     "@vscode/vsce": "3.9.2",
@@ -2048,6 +2059,7 @@
     "socks": "^2.8.9",
     "tiktoken": "^1.0.22",
     "undici": "^7.30.1",
-    "ws": "^8.21.0"
+    "ws": "^8.21.0",
+    "yauzl": "3.4.0"
   }
 }

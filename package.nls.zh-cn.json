@@ -2,6 +2,8 @@
   "displayName": "Unify Chat Provider",
   "description": "通过 Language Model API，将多个大语言模型 API 供应商集成到 VS Code 的 GitHub Copilot Chat 中。",
   "languageModelChatProviders.displayName": "Unify Chat Provider",
+  "command.checkForUpdates.title": "Unify Chat Provider: 检查更新",
+  "configuration.updates.checkAutomatically.description": "每天最多自动检查一次此维护分支的 GitHub Release。确认后才下载并安装，窗口由你手动重载。",
   "command.addProvider.title": "Unify Chat Provider: 添加供应商",
   "command.removeProvider.title": "Unify Chat Provider: 移除供应商",
   "command.importConfig.title": "Unify Chat Provider: 导入配置",

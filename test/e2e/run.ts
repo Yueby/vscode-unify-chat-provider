@@ -616,6 +616,7 @@ async function main(): Promise<void> {
         extensionTestsPath,
         extensionTestsEnv: {
           UCP_E2E_PROPOSED_MODE: mode,
+          ...(mode === "enabled" ? { UCP_E2E_EXTENSIONS_DIR: extensionsDir } : {}),
           UCP_E2E_EXTENSION_ID: mode === "disabled"
             ? DISABLED_PROPOSAL_EXTENSION_ID
             : "Yueby.vscode-unify-chat-provider",

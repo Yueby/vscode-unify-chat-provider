@@ -43,6 +43,21 @@ Integrate multiple LLM API providers into VS Code's GitHub Copilot Chat using th
 - Disable the upstream `SmallMain.vscode-unify-chat-provider` extension before activating this fork: they share commands, the model vendor, and the `unifyChatProvider` settings section. Provider/model settings are reused; sign in again or re-enter securely stored API keys for this extension identity.
 - Explicit OAuth2 redirect URIs must target the new identity and match the OAuth server registration. Optional Proposed API permissions are also identity-scoped; enable them explicitly when needed.
 
+## GitHub Release Updates
+
+This fork checks formal releases from `Yueby/vscode-unify-chat-provider`. Production instances check after startup and at most once per 24 hours; only the main-instance leader performs automatic checks. Disable automatic checks with `unifyChatProvider.updates.checkAutomatically`, or run **Unify Chat Provider: Check for Updates** manually at any time. Development and test hosts do not check automatically.
+
+A newer stable release offers **Install Update**, **Release Notes**, or **Later**. Downloads start only after confirmation. The updater requires the matching `.sha256`, verifies SHA-256 and the VSIX publisher/name/version, then uses VS Code’s native installer. Download/verification can be cancelled; installation is not cancellable. Reload is offered separately and only runs when you choose it. Checks use the application network/proxy configuration without provider authentication. Executable updates require TLS certificate verification; relaxed proxy TLS settings or a process-wide TLS bypass block the update request. SHA-256 provides integrity, not an independent maintainer signature; update trust still depends on the repository and its release permissions.
+
+Release contract:
+
+- Stable tags such as `v8.14.1`; draft and prerelease builds are ignored.
+- Assets named `vscode-unify-chat-provider-8.14.1.vsix` and `vscode-unify-chat-provider-8.14.1.vsix.sha256`. The checksum file contains `<64-digit SHA-256>  <VSIX filename>` followed by a newline.
+- The existing Release workflow now defaults to GitHub distribution with Marketplace publishing off and a draft release for review. Both assets are uploaded and reconciled before you publish the draft.
+- For the first updater release, create a `v8.14.1` tag containing this implementation and run the Release workflow with `mode=resume_from_tag`, `github_tag=v8.14.1`. Review the resulting assets, then publish the draft. Full mode bumps beyond the version currently in package.json and is suitable for subsequent releases.
+
+Install the first updater-enabled VSIX manually. No Release is created by merely running or installing the extension.
+
 ## Sponsors
 
 <table>

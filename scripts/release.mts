@@ -1572,7 +1572,37 @@ function extractChangelogEntryForTag(
   return entry ? `${entry}\n` : null;
 }
 
-async function publishGitHubRelease(params: {
+async function publishGitHubRelease(
+  params: Parameters<typeof publishGitHubReleaseAsset>[0],
+): Promise<void> {
+  if (params.skipUpload) {
+    await publishGitHubReleaseAsset(params);
+    return;
+  }
+
+  const checksumPath = `${params.assetPath}.sha256`;
+  const digest = createHash('sha256')
+    .update(await readFile(params.assetPath))
+    .digest('hex');
+  await writeFile(
+    checksumPath,
+    `${digest}  ${basename(params.assetPath)}\n`,
+    'ascii',
+  );
+
+  await publishGitHubReleaseAsset(params);
+  await publishGitHubReleaseAsset({
+    ...params,
+    assetPath: checksumPath,
+    skipCreate: true,
+    mode: params.mode === 'full' ? 'resume' : params.mode,
+  });
+
+  await reconcileGitHubPublication(params);
+  await reconcileGitHubPublication({ ...params, assetPath: checksumPath });
+}
+
+async function publishGitHubReleaseAsset(params: {
   repoRoot: string;
   tagName: string;
   title: string;

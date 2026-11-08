@@ -25,12 +25,15 @@ describe('VSIX package contents', () => {
       'out/client/openai/responses-client.js',
       'out/client/zed/chat-codecs.js',
       'out/secret/secret-store.js',
+      'out/update/runtime.js',
+      'out/update/package.js',
       'dist/chat-lib-parser.cjs',
       'dist/chat-lib-diff.cjs',
       'dist/tree-sitter.wasm',
     ];
     const testModules = [
       'out/auth/test-control',
+      'out/update/test-control',
       'out/completion/test-control',
       'out/completion/test-harness',
       'out/completion/model/testing-resolver',
@@ -43,6 +46,7 @@ describe('VSIX package contents', () => {
       'out-test/e2e/run.js',
       'scripts/fixture.ts',
       '.env.package-fixture',
+      'fixture.vsix.sha256',
     ];
     await writeFile(join(root, 'package.json'), JSON.stringify({
       name: 'ucp-package-fixture', publisher: 'ucp-e2e', version: '1.0.0',

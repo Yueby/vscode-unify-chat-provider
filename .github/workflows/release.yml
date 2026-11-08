@@ -32,14 +32,14 @@ on:
         description: Publish to VS Code Marketplace (vsce publish)
         type: boolean
         required: true
-        default: true
+        default: false
       create_github_release:
         description: Create GitHub Release
         type: boolean
         required: true
         default: true
       upload_vsix_to_github:
-        description: Upload VSIX to GitHub Release
+        description: Upload VSIX and SHA-256 checksum to GitHub Release
         type: boolean
         required: true
         default: true
@@ -47,7 +47,7 @@ on:
         description: Create GitHub Release as draft
         type: boolean
         required: true
-        default: false
+        default: true
       dry_run:
         description: Dry-run (no file changes, no publish)
         type: boolean

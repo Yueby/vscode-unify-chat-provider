@@ -2,6 +2,8 @@
   "displayName": "Unify Chat Provider",
   "description": "Integrate multiple LLM API providers into VS Code's GitHub Copilot Chat using the Language Model API.",
   "languageModelChatProviders.displayName": "Unify Chat Provider",
+  "command.checkForUpdates.title": "Unify Chat Provider: Check for Updates",
+  "configuration.updates.checkAutomatically.description": "Automatically check this fork’s GitHub Releases at most once per day. Download and install only after confirmation; window reload remains manual.",
   "command.addProvider.title": "Unify Chat Provider: Add Provider",
   "command.removeProvider.title": "Unify Chat Provider: Remove Provider",
   "command.importConfig.title": "Unify Chat Provider: Import Config",

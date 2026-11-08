@@ -1345,5 +1345,17 @@
   "OrcaRouter": "OrcaRouter",
   "Official API with automatic model endpoint routing": "支持按模型自动路由端点的官方 API",
   "OpenCode Go": "OpenCode Go",
-  "OpenCode Zen": "OpenCode Zen"
+  "OpenCode Zen": "OpenCode Zen",
+  "A new version of Unify Chat Provider is available: v{0}": "Unify Chat Provider 已发布新版本：v{0}",
+  "Install Update": "安装更新",
+  "Release Notes": "更新日志",
+  "Downloading and verifying update...": "正在下载并校验更新...",
+  "No published update available.": "未检测到可用的更新发布。",
+  "Update installed (v{0}). Reload to apply changes.": "更新已安装（v{0}）。重载窗口以应用更改。",
+  "Reload Window": "重载窗口",
+  "Update check failed: network connection error.": "更新失败：网络连接异常。",
+  "Update check failed: invalid release format or manifest.": "更新失败：Release 清单或格式无效。",
+  "Update check failed: SHA256 checksum mismatch.": "更新失败：SHA256 校验和不匹配。",
+  "Update check failed: extension package verification failed.": "更新失败：扩展包完整性或标识校验失败。",
+  "Update installation failed. Please try again later.": "扩展安装失败，请稍后重试。"
 }

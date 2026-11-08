@@ -6,6 +6,8 @@ test/**
 out-test/**
 out/auth/test-control.js
 out/auth/test-control.js.map
+out/update/test-control.js
+out/update/test-control.js.map
 out/completion/test-control.js
 out/completion/test-control.js.map
 out/completion/test-harness.js
@@ -43,6 +45,7 @@ scripts/**
 .env*
 *.ts
 *.vsix
+*.vsix.sha256
 tsconfig*.json
 AGENTS.md
 .git/**

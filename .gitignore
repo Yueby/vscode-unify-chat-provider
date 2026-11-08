@@ -4,6 +4,7 @@ out-test
 /dist
 .vscode-test
 *.vsix
+*.vsix.sha256
 npm-debug.log*
 scripts/claude-proxy.log
 
