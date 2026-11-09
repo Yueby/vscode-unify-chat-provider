@@ -216,6 +216,220 @@ describe('release script coordination', () => {
   }, 60_000);
 });
 
+describe('automatic GitHub release notes', () => {
+  it('uses the highest reachable stable base and stops at the target tag', async () => {
+    const fixture = await createGitHubFixture();
+    const cwd = fixture.repository.release;
+    const changelog = await readFile(join(cwd, 'CHANGELOG.md'), 'utf8');
+    runOk('git', ['checkout', '-b', 'unrelated'], cwd);
+    runOk('git', ['commit', '--allow-empty', '-m', 'feat: unrelated branch'], cwd);
+    runOk('git', ['tag', 'v1.0.9'], cwd);
+    runOk('git', ['checkout', 'main'], cwd);
+    runOk('git', ['commit', '--allow-empty', '-m', 'feat: before selected base'], cwd);
+    runOk('git', ['tag', '-a', 'v1.0.5', '-m', 'base'], cwd);
+    runOk('git', ['commit', '--allow-empty', '-m', 'feat(chat): tagged feature'], cwd);
+    // A nearer, lower version and non-stable/invalid/future tags cannot replace the base.
+    for (const tag of ['v0.9.0', 'v1.0.8-beta.1', 'v01.0.8', 'v9.0.0']) {
+      runOk('git', ['tag', tag], cwd);
+    }
+    const packagePath = join(cwd, 'package.json');
+    await writeFile(packagePath, (await readFile(packagePath, 'utf8')).replace('"version": "1.0.0"', '"version": "1.1.0"'));
+    runOk('git', ['add', 'package.json'], cwd);
+    runOk('git', ['commit', '-m', 'fix: tagged repair'], cwd, {
+      ...process.env, GIT_AUTHOR_DATE: '2026-01-01T23:30:00-05:00', GIT_COMMITTER_DATE: '2026-01-01T23:30:00-05:00',
+    });
+    const target = runOk('git', ['rev-parse', 'HEAD'], cwd).stdout.trim();
+    runOk('git', ['tag', '-a', 'v1.1.0', '-m', 'target'], cwd);
+    runOk('git', ['push', 'origin', 'v1.1.0'], cwd);
+    runOk('git', ['commit', '--allow-empty', '-m', 'feat: after target on main'], cwd);
+    const status = runOk('git', ['status', '--porcelain'], cwd).stdout;
+    const args = ['--yes', '--github-tag', 'v1.1.0', '--auto-notes', '--skip-github-upload'];
+    const result = runRelease(cwd, args, fixture.env);
+
+    expect(`${result.stderr}\n${result.stdout}`).not.toContain('failed (attempt');
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('auto (v1.0.5..v1.1.0)');
+    const state = JSON.parse(await readFile(fixture.githubState, 'utf8'));
+    expect(state).toMatchObject({ targetCommitish: target, isDraft: false });
+    expect(state.body).toContain('## v1.1.0 (2026-01-02)');
+    expect(state.body).toContain('### Features\n- chat: tagged feature');
+    expect(state.body).toContain('### Fixes\n- tagged repair');
+    for (const excluded of ['initial release', 'before selected base', 'after target', 'unrelated branch']) {
+      expect(state.body).not.toContain(excluded);
+    }
+    expect(await readFile(join(cwd, 'CHANGELOG.md'), 'utf8')).toBe(changelog);
+    expect(runOk('git', ['status', '--porcelain'], cwd).stdout).toBe(status);
+
+    const before = await readFile(fixture.githubState, 'utf8');
+    await writeFile(fixture.callLog, '');
+    const resumed = runRelease(cwd, args, { ...fixture.env, RELEASE_TEST_NOW: '2026-01-04T12:00:00Z' });
+    expect(resumed.status).toBe(0);
+    expect(await readFile(fixture.githubState, 'utf8')).toBe(before);
+    expect(gitHubMutations(await readToolCalls(fixture.callLog))).toEqual([]);
+  }, 60_000);
+
+  it('finds the previous stable release through every parent of a tagged merge', async () => {
+    const fixture = await createGitHubFixture();
+    const cwd = fixture.repository.release;
+    runOk('git', ['checkout', '-b', 'released-side'], cwd);
+    runOk('git', ['commit', '--allow-empty', '-m', 'feat: already published side feature'], cwd);
+    runOk('git', ['tag', 'v1.0.5'], cwd);
+    runOk('git', ['checkout', 'main'], cwd);
+    const packagePath = join(cwd, 'package.json');
+    await writeFile(packagePath, (await readFile(packagePath, 'utf8')).replace('"version": "1.0.0"', '"version": "1.1.0"'));
+    runOk('git', ['add', 'package.json'], cwd);
+    runOk('git', ['commit', '-m', 'fix: unreleased main repair'], cwd);
+    runOk('git', ['merge', '--no-ff', 'released-side', '-m', 'merge release ancestry'], cwd);
+    runOk('git', ['tag', 'v1.1.0'], cwd);
+    runOk('git', ['push', 'origin', 'v1.1.0'], cwd);
+    const result = runRelease(cwd, ['--yes', '--github-tag', 'v1.1.0', '--auto-notes', '--skip-github-upload'], fixture.env);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('auto (v1.0.5..v1.1.0)');
+    const state = JSON.parse(await readFile(fixture.githubState, 'utf8'));
+    expect(state.body).toContain('unreleased main repair');
+    expect(state.body).not.toContain('already published side feature');
+  }, 60_000);
+
+  it.each([true, false])('collects full history without a base (root target: %s) and resumes with a fixed UTC date', async (rootTarget) => {
+    const fixture = await createGitHubFixture({ changelog: null, commitDate: '2026-02-03T00:30:00+09:00' });
+    const cwd = fixture.repository.release;
+    if (!rootTarget) {
+      runOk('git', ['tag', '-d', 'v1.0.0'], cwd);
+      runOk('git', ['push', 'origin', ':refs/tags/v1.0.0'], cwd);
+      runOk('git', ['commit', '--allow-empty', '-m', 'fix: first release repair'], cwd, {
+        ...process.env, GIT_AUTHOR_DATE: '2026-02-03T00:30:00+09:00', GIT_COMMITTER_DATE: '2026-02-03T00:30:00+09:00',
+      });
+      runOk('git', ['tag', 'v1.0.0'], cwd);
+      runOk('git', ['push', 'origin', 'v1.0.0'], cwd);
+    }
+    const args = ['--yes', '--resume-from-tag', 'v1.0.0', '--auto-notes', '--skip-publish', '--skip-github-upload'];
+    const result = runRelease(cwd, args, { ...fixture.env, RELEASE_TEST_NOW: '2026-03-01T00:00:00Z' });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('auto (v1.0.0, full history)');
+    const before = await readFile(fixture.githubState, 'utf8');
+    const state = JSON.parse(before);
+    expect(state.body).toContain('## v1.0.0 (2026-02-02)');
+    expect(state.body).toContain('### Features\n- initial release');
+    if (!rootTarget) expect(state.body).toContain('### Fixes\n- first release repair');
+    await writeFile(fixture.callLog, '');
+    const resumed = runRelease(cwd, args, { ...fixture.env, RELEASE_TEST_NOW: '2026-03-02T00:00:00Z' });
+    expect(resumed.status).toBe(0);
+    expect(await readFile(fixture.githubState, 'utf8')).toBe(before);
+    expect(gitHubMutations(await readToolCalls(fixture.callLog))).toEqual([]);
+    await expect(readFile(join(cwd, 'CHANGELOG.md'))).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 60_000);
+
+  it.each(['--resume-from-tag', '--github-tag'])('rejects combining --auto-notes and --github-notes-file in %s mode', async (mode) => {
+    const fixture = await createGitHubFixture();
+    const result = runRelease(fixture.repository.release, [
+      ...fixture.args.map((arg) => arg === '--resume-from-tag' ? mode : arg), '--auto-notes',
+    ], fixture.env);
+    expect(result.status).not.toBe(0);
+    expect(`${result.stderr}\n${result.stdout}`).toContain('Use either --auto-notes or --github-notes-file, not both.');
+    await expect(readFile(fixture.callLog)).rejects.toMatchObject({ code: 'ENOENT' });
+  }, 60_000);
+
+  it('rejects --auto-notes in full mode before changing files', async () => {
+    const repository = await createRepository();
+    const result = runRelease(repository.release, ['--yes', '--auto-notes', '--version', '1.1.0']);
+    expect(result.status).not.toBe(0);
+    expect(`${result.stderr}\n${result.stdout}`).toContain('--auto-notes requires --resume-from-tag or --github-tag.');
+    expect(runOk('git', ['status', '--porcelain'], repository.release).stdout).toBe('');
+  }, 60_000);
+
+  it('preserves the tagged CHANGELOG notes when --auto-notes is absent', async () => {
+    const fixture = await createGitHubFixture();
+    const result = runRelease(fixture.repository.release, [
+      '--yes', '--github-tag', 'v1.0.0', '--skip-github-upload',
+    ], fixture.env);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('CHANGELOG.md (v1.0.0)');
+    expect(JSON.parse(await readFile(fixture.githubState, 'utf8')).body).toBe('## v1.0.0 (2026-01-01)\n\n- Initial.\n');
+  }, 60_000);
+});
+
+describe('GitHub mutation authorization failures', () => {
+  const permanentErrors = [
+    'HTTP 401: Unauthorized',
+    'HTTP 403: Bad credentials',
+    'HTTP 403: Resource not accessible by integration',
+    'refusing to allow an OAuth App to create or update workflow .github/workflows/release.yml without workflow scope',
+  ];
+  const operations = ['create', 'upload'] as const;
+
+  it.each(operations.flatMap((operation) => permanentErrors.map((output) => ({ operation, output }))))(
+    'fails fast for $operation: $output', async ({ operation, output }) => {
+      const fixture = await createGitHubFixture();
+      if (operation === 'upload') await writeGitHubState(fixture, []);
+      const result = runRelease(fixture.repository.release, fixture.args, {
+        ...fixture.env,
+        RELEASE_TEST_GITHUB_FAIL_OPERATION: operation,
+        RELEASE_TEST_GITHUB_FAILURE_OUTPUT: output,
+        RELEASE_TEST_FAST_RETRIES: 'true',
+      });
+      expect(result.status).not.toBe(0);
+      expect(`${result.stderr}\n${result.stdout}`).toContain('NonRetryableReleaseError');
+      expect(`${result.stderr}\n${result.stdout}`).toContain(output);
+      const calls = await readToolCalls(fixture.callLog);
+      expect(gitHubMutations(calls).map((call) => call.args[1])).toEqual([operation]);
+      expect(calls.filter((call) => call.tool === 'gh').every((call) =>
+        call.args[0] === '--version' || (call.args[0] === 'release' && ['view', 'create', 'upload'].includes(call.args[1] ?? '')),
+      )).toBe(true);
+    }, 60_000,
+  );
+
+  it.each(operations)('fails fast when %s authorization also prevents read-only reconciliation', async (operation) => {
+    const fixture = await createGitHubFixture();
+    if (operation === 'upload') await writeGitHubState(fixture, []);
+    const result = runRelease(fixture.repository.release, fixture.args, {
+      ...fixture.env,
+      RELEASE_TEST_GITHUB_FAIL_OPERATION: operation,
+      RELEASE_TEST_GITHUB_FAILURE_OUTPUT: 'HTTP401: Unauthorized',
+      RELEASE_TEST_GITHUB_RECONCILIATION_ERROR: 'HTTP 401: Bad credentials',
+      RELEASE_TEST_FAST_RETRIES: 'true',
+    });
+    expect(result.status).not.toBe(0);
+    expect(`${result.stderr}\n${result.stdout}`).toContain('NonRetryableReleaseError');
+    expect(`${result.stderr}\n${result.stdout}`).toContain('Reconciliation failed:');
+    expect(gitHubMutations(await readToolCalls(fixture.callLog)).map((call) => call.args[1])).toEqual([operation]);
+  }, 60_000);
+
+  it.each(operations)('reconciles a matching remote %s despite a permanent-looking client error', async (operation) => {
+    const fixture = await createGitHubFixture();
+    if (operation === 'upload') await writeGitHubState(fixture, []);
+    const result = runRelease(fixture.repository.release, fixture.args, {
+      ...fixture.env,
+      RELEASE_TEST_GITHUB_FAIL_OPERATION: operation,
+      RELEASE_TEST_GITHUB_FAILURE_OUTPUT: 'HTTP 401: Bad credentials',
+      RELEASE_TEST_GITHUB_ERROR_AFTER_WRITE: 'true',
+    });
+    expect(result.status).toBe(0);
+    expect(`${result.stderr}\n${result.stdout}`).not.toContain('failed (attempt');
+    expect(gitHubMutations(await readToolCalls(fixture.callLog)).filter((call) => call.args[1] === operation))
+      .toHaveLength(operation === 'upload' ? 2 : 1);
+  }, 60_000);
+
+  it.each(operations.flatMap((operation) => [
+    'HTTP 429: Too Many Requests',
+    'HTTP 403: API rate limit exceeded',
+    'HTTP 403: secondary rate limit exceeded',
+    'HTTP 503: temporary failure',
+  ].map((output) => ({ operation, output }))))('retains eight transient attempts for $operation: $output', async ({ operation, output }) => {
+    const fixture = await createGitHubFixture();
+    if (operation === 'upload') await writeGitHubState(fixture, []);
+    const result = runRelease(fixture.repository.release, fixture.args, {
+      ...fixture.env,
+      RELEASE_TEST_GITHUB_FAIL_OPERATION: operation,
+      RELEASE_TEST_GITHUB_FAILURE_OUTPUT: output,
+      RELEASE_TEST_FAST_RETRIES: 'true',
+    });
+    expect(result.status).not.toBe(0);
+    expect(`${result.stderr}\n${result.stdout}`).toContain('attempt 8/8');
+    expect(`${result.stderr}\n${result.stdout}`).not.toContain('NonRetryableReleaseError');
+    expect(gitHubMutations(await readToolCalls(fixture.callLog)).map((call) => call.args[1])).toEqual(Array(8).fill(operation));
+  }, 60_000);
+});
+
 describe('GitHub release checksums', () => {
   it('uploads the VSIX and its standard ASCII SHA-256 sidecar to a draft release', async () => {
     const fixture = await createGitHubFixture();
@@ -372,8 +586,8 @@ function gitHubMutations(calls: ToolCall[]): ToolCall[] {
   return calls.filter((call) => call.tool === 'gh' && ['create', 'upload'].includes(call.args[1] ?? ''));
 }
 
-async function createGitHubFixture() {
-  const repository = await createRepository();
+async function createGitHubFixture(options: { changelog?: string | null; commitDate?: string } = {}) {
+  const repository = await createRepository(options);
   const toolsDirectory = join(repository.root, 'tools');
   const callLog = join(repository.root, 'tool-calls.jsonl');
   const githubState = join(repository.root, 'github-release.json');
@@ -408,7 +622,7 @@ async function writeGitHubState(
   }), 'utf8');
 }
 
-async function createRepository(): Promise<TestRepository> {
+async function createRepository(options: { changelog?: string | null; commitDate?: string } = {}): Promise<TestRepository> {
   const root = await mkdtemp(join(tmpdir(), 'ucp-release-script-'));
   temporaryRoots.push(root);
   const seed = join(root, 'seed');
@@ -456,15 +670,19 @@ async function createRepository(): Promise<TestRepository> {
     )}\n`,
     'utf8',
   );
-  await writeFile(
-    join(seed, 'CHANGELOG.md'),
-    '# Changelog\n\n## v1.0.0 - 2026-01-01\n\n- Initial.\n',
-    'utf8',
-  );
+  if (options.changelog !== null) {
+    await writeFile(
+      join(seed, 'CHANGELOG.md'),
+      options.changelog ?? '# Changelog\n\n## v1.0.0 - 2026-01-01\n\n- Initial.\n',
+      'utf8',
+    );
+  }
   await writeFile(join(seed, 'README.md'), '# Test Extension\n', 'utf8');
   await writeFile(join(seed, 'extension.js'), 'module.exports = {};\n', 'utf8');
   runOk('git', ['add', '.'], seed);
-  runOk('git', ['commit', '-m', 'feat: initial release'], seed);
+  runOk('git', ['commit', '-m', 'feat: initial release'], seed, options.commitDate ? {
+    ...process.env, GIT_AUTHOR_DATE: options.commitDate, GIT_COMMITTER_DATE: options.commitDate,
+  } : process.env);
   runOk('git', ['tag', '-a', 'v1.0.0', '-m', 'v1.0.0'], seed);
   runOk('git', ['clone', '--bare', seed, origin], root);
   runOk('git', ['clone', origin, release], root);
@@ -561,11 +779,25 @@ if (args[0] === '--version') {
 }
 if (args[0] === 'release' && args[1] === 'view') {
   const state = process.env.RELEASE_TEST_GITHUB_STATE;
+  if (state && fs.existsSync(state + '.mutation-failed')) {
+    process.stderr.write(process.env.RELEASE_TEST_GITHUB_RECONCILIATION_ERROR + '\\n');
+    process.exit(1);
+  }
   if (state && fs.existsSync(state)) {
     process.stdout.write(fs.readFileSync(state, 'utf8'));
     process.exit(0);
   }
   process.stderr.write('release not found\\n');
+  process.exit(1);
+}
+const mutationError = args[0] === 'release' && args[1] === process.env.RELEASE_TEST_GITHUB_FAIL_OPERATION
+  ? process.env.RELEASE_TEST_GITHUB_FAILURE_OUTPUT
+  : undefined;
+if (mutationError && !process.env.RELEASE_TEST_GITHUB_ERROR_AFTER_WRITE) {
+  if (process.env.RELEASE_TEST_GITHUB_RECONCILIATION_ERROR) {
+    fs.writeFileSync(process.env.RELEASE_TEST_GITHUB_STATE + '.mutation-failed', 'failed');
+  }
+  process.stderr.write(mutationError + '\\n');
   process.exit(1);
 }
 if (args[0] === 'release' && args[1] === 'create') {
@@ -581,7 +813,8 @@ if (args[0] === 'release' && args[1] === 'create') {
       assets: [],
     }));
   }
-  process.exit(process.env.RELEASE_TEST_AMBIGUOUS_RESPONSES ? 1 : 0);
+  if (mutationError) process.stderr.write(mutationError + '\\n');
+  process.exit(process.env.RELEASE_TEST_AMBIGUOUS_RESPONSES || mutationError ? 1 : 0);
 }
 if (args[0] === 'release' && args[1] === 'upload') {
   const state = process.env.RELEASE_TEST_GITHUB_STATE;
@@ -598,7 +831,8 @@ if (args[0] === 'release' && args[1] === 'upload') {
     });
     fs.writeFileSync(state, JSON.stringify(metadata));
   }
-  process.exit(process.env.RELEASE_TEST_AMBIGUOUS_RESPONSES ? 1 : 0);
+  if (mutationError) process.stderr.write(mutationError + '\\n');
+  process.exit(process.env.RELEASE_TEST_AMBIGUOUS_RESPONSES || mutationError ? 1 : 0);
 }
 process.exit(0);
 `,
@@ -612,6 +846,20 @@ process.exit(0);
     `import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import { fileURLToPath } from 'node:url';
+if (process.env.RELEASE_TEST_FAST_RETRIES) {
+  const setTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, delay, ...args) => setTimeout(callback, 0, ...args);
+}
+if (process.env.RELEASE_TEST_NOW) {
+  const RealDate = Date;
+  globalThis.Date = class extends RealDate {
+    constructor(...args) {
+      if (args.length) super(...args);
+      else super(process.env.RELEASE_TEST_NOW);
+    }
+    static now() { return new RealDate(process.env.RELEASE_TEST_NOW).getTime(); }
+  };
+}
 const spawn = childProcess.spawn;
 childProcess.spawn = (command, args, options) => {
   if (command === 'gh' || command === 'vsce') {
@@ -650,8 +898,9 @@ function runOk(
   command: string,
   args: string[],
   cwd: string,
+  env: NodeJS.ProcessEnv = process.env,
 ): SpawnSyncReturns<string> {
-  const result = run(command, args, cwd);
+  const result = run(command, args, cwd, env);
   if (result.status !== 0) {
     throw new Error(
       `${command} ${args.join(' ')} failed: ${result.stderr || result.stdout}`,

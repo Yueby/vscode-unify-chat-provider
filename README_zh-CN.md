@@ -54,8 +54,12 @@ Unify Chat Provider
 
 - 使用 `v8.14.1` 这类正式 tag，忽略 draft 与 prerelease。
 - 附件为 `vscode-unify-chat-provider-8.14.1.vsix` 和 `vscode-unify-chat-provider-8.14.1.vsix.sha256`。校验文件为 `<64位SHA-256>  <VSIX文件名>`，末尾换行。
-- 现有 Release 工作流默认仅走 GitHub 分发，Marketplace 发布关闭，并先生成草稿。VSIX 和校验文件都上传并核对后，再由你发布草稿。
-- 首个更新器版本：创建包含本实现的 `v8.14.1` tag，再运行 Release 工作流，选择 `mode=resume_from_tag`、`github_tag=v8.14.1`。核对附件后发布草稿。Full 模式会在当前 package.json 版本之上递增，适合后续版本。
+- 推送正式 `vX.Y.Z` tag 即触发 Release 工作流，tag 必须与 package.json 版本一致。CI 自动运行检查和已安装版 Extension Host 测试、构建并校验双附件，最后自动正式发布。普通分支推送不发版，tag 触发时不发布 Marketplace。
+- 更新说明自动收集上一可达正式版本 tag 到目标 tag 之间的提交，并按变更类型分组。日期固定为目标提交的 UTC 日期，恢复重跑时内容保持确定性，无需手写 CHANGELOG.md。
+- 上传和核对附件期间先在 CI 内部使用草稿，双附件完整后自动转为正式 Release。已发布 tag 重跑时只核对已有内容，不会退回草稿。
+- 对添加 tag 触发器之前已经存在的 tag，可从 main 一次性触发 `workflow_dispatch`，选择 `mode=resume_from_tag`、已有 `github_tag` 和 `draft=false`。工作流会先保存当前发布工具再切换到旧 tag；以后的新版本 tag 自动触发。
+
+日常发布补丁版：先提交代码，运行 `npm exec --yes --package=npm@10.8.2 -- npm version patch`，再推送 main 和刚生成的版本 tag。后续不需要在 Release 网页操作。
 
 首次安装带更新器的 VSIX 仍需手动完成。运行或安装扩展本身不会创建 Release。
 

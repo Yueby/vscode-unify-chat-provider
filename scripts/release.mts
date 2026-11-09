@@ -16,6 +16,7 @@
  *   node scripts/release.mts --bump patch|minor|major
  *   node scripts/release.mts --resume-from-tag v1.2.3
  *   node scripts/release.mts --github-tag v1.2.3
+ *   node scripts/release.mts --resume-from-tag v1.2.3 --auto-notes
  *   node scripts/release.mts --github-tag v1.2.3 --skip-github-upload
  *   node scripts/release.mts --github-tag v1.2.3 --skip-github-create --github-asset path/to/file.vsix
  *
@@ -68,6 +69,7 @@ const { values } = parseArgs({
     'github-tag': { type: 'string' },
     'github-asset': { type: 'string' },
     'github-notes-file': { type: 'string' },
+    'auto-notes': { type: 'boolean' },
     'skip-publish': { type: 'boolean' },
     'skip-github': { type: 'boolean' },
     'skip-github-create': { type: 'boolean' },
@@ -96,6 +98,7 @@ const githubNotesFileInput =
   typeof values['github-notes-file'] === 'string'
     ? values['github-notes-file']
     : undefined;
+const autoNotes = values['auto-notes'] === true;
 const skipPublish = values['skip-publish'] === true;
 const skipGitHub = values['skip-github'] === true;
 const skipGitHubCreate = skipGitHub || values['skip-github-create'] === true;
@@ -135,6 +138,13 @@ async function main(): Promise<void> {
     );
   }
 
+  if (autoNotes && githubNotesFileInput !== undefined) {
+    throw new Error('Use either --auto-notes or --github-notes-file, not both.');
+  }
+  if (autoNotes && !resumeFromTagInput && !githubTagInput) {
+    throw new Error('--auto-notes requires --resume-from-tag or --github-tag.');
+  }
+
   if (resumeFromTagInput) {
     await runFromTagMode({
       repoRoot,
@@ -143,6 +153,7 @@ async function main(): Promise<void> {
       tagInput: resumeFromTagInput,
       assetInput: githubAssetInput,
       notesFileInput: githubNotesFileInput,
+      autoNotes,
       publishMarketplace: !skipPublish,
       skipGitHubCreate,
       skipGitHubUpload,
@@ -164,6 +175,7 @@ async function main(): Promise<void> {
       tagInput: githubTagInput,
       assetInput: githubAssetInput,
       notesFileInput: githubNotesFileInput,
+      autoNotes,
       publishMarketplace: false,
       skipGitHubCreate,
       skipGitHubUpload,
@@ -555,6 +567,29 @@ async function getLatestGitTag(cwd: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+async function getPreviousStableTag(
+  cwd: string,
+  targetCommit: string,
+  version: Semver,
+): Promise<string | null> {
+  // Include every parent of a merge target. The version filter excludes the target tag itself.
+  const result = await runCapture(cwd, 'git', [
+    'tag', '--merged', targetCommit, '--list', 'v*',
+  ]);
+  let previous: { tag: string; version: Semver } | null = null;
+  for (const tag of result.stdout.split(/\r?\n/).filter(Boolean)) {
+    if (!/^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(tag)) continue;
+    const candidate = parseSemver(tag.slice(1));
+    if (!candidate || candidate.prerelease || compareSemverPrecedence(candidate, version) >= 0) {
+      continue;
+    }
+    if (!previous || compareSemverPrecedence(candidate, previous.version) > 0) {
+      previous = { tag, version: candidate };
+    }
+  }
+  return previous?.tag ?? null;
 }
 
 async function getCommits(cwd: string, range: string): Promise<Commit[]> {
@@ -1358,6 +1393,7 @@ async function runFromTagMode(params: {
   tagInput: string;
   assetInput: string | undefined;
   notesFileInput: string | undefined;
+  autoNotes: boolean;
   publishMarketplace: boolean;
   skipGitHubCreate: boolean;
   skipGitHubUpload: boolean;
@@ -1371,7 +1407,8 @@ async function runFromTagMode(params: {
   const tagName = normalizeGitTag(params.tagInput);
   await assertValidTagName(params.repoRoot, tagName);
   const versionFromTag = tagName.startsWith('v') ? tagName.slice(1) : tagName;
-  if (!parseSemver(versionFromTag)) {
+  const tagVersion = parseSemver(versionFromTag);
+  if (!tagVersion) {
     throw new Error(
       `Release tag must contain a semantic version (for example v1.2.3): ${tagName}`,
     );
@@ -1427,6 +1464,20 @@ async function runFromTagMode(params: {
   if (params.notesFileInput) {
     notesSource = params.notesFileInput;
     notes = await readTextFile(params.notesFileInput);
+  } else if (params.autoNotes) {
+    const baseTag = await getPreviousStableTag(params.repoRoot, tagCommit, tagVersion);
+    const range = baseTag ? `${baseTag}..${tagCommit}` : tagCommit;
+    const commits = await getCommits(params.repoRoot, range);
+    const commitDate = (
+      await runCapture(params.repoRoot, 'git', ['show', '-s', '--format=%cI', tagCommit])
+    ).stdout.trim();
+    const date = new Date(commitDate).toISOString().slice(0, 10);
+    notes = changelogToGitHubReleaseNotes(renderChangelogEntry({
+      version: versionFromTag,
+      date,
+      sections: groupCommits(commits),
+    }));
+    notesSource = `auto (${baseTag ? `${baseTag}..${tagName}` : `${tagName}, full history`})`;
   } else {
     const changelogText = (
       await runCapture(params.repoRoot, 'git', ['show', changelogSource])
@@ -1691,20 +1742,18 @@ async function publishGitHubReleaseAsset(params: {
             return;
           }
 
-          existingRelease = await getMatchingGitHubReleaseOrNull({
-            repoRoot: params.repoRoot,
-            tagName: params.tagName,
-            targetCommitish: params.targetCommitish,
-            title: params.title,
-            notes: params.notes,
-            draft: params.draft,
-            checkPresentation: true,
-          });
-          if (!existingRelease) {
-            throw new Error(
-              `gh release create failed (${String(result.code)}): ${result.stderr || result.stdout}`,
-            );
-          }
+          existingRelease = await reconcileGhMutationFailure(
+            `gh release create failed (${String(result.code)}): ${result.stderr}\n${result.stdout}`,
+            () => getMatchingGitHubReleaseOrNull({
+              repoRoot: params.repoRoot,
+              tagName: params.tagName,
+              targetCommitish: params.targetCommitish,
+              title: params.title,
+              notes: params.notes,
+              draft: params.draft,
+              checkPresentation: true,
+            }),
+          );
           if (!params.skipUpload) {
             shouldUpload = await shouldUploadGitHubAsset({
               assetPath: params.assetPath,
@@ -1740,21 +1789,18 @@ async function publishGitHubReleaseAsset(params: {
             { env: ghEnv },
           );
           if (result.code !== 0) {
-            const reconciled = await reconcileGitHubAssetAfterMutationError({
-              repoRoot: params.repoRoot,
-              tagName: params.tagName,
-              targetCommitish: params.targetCommitish,
-              title: params.title,
-              notes: params.notes,
-              draft: params.draft,
-              checkPresentation: !params.skipCreate,
-              assetPath: params.assetPath,
-            });
-            if (reconciled) {
-              return;
-            }
-            throw new Error(
-              `gh release upload failed (${String(result.code)}): ${result.stderr || result.stdout}`,
+            await reconcileGhMutationFailure(
+              `gh release upload failed (${String(result.code)}): ${result.stderr}\n${result.stdout}`,
+              () => reconcileGitHubAssetAfterMutationError({
+                repoRoot: params.repoRoot,
+                tagName: params.tagName,
+                targetCommitish: params.targetCommitish,
+                title: params.title,
+                notes: params.notes,
+                draft: params.draft,
+                checkPresentation: !params.skipCreate,
+                assetPath: params.assetPath,
+              }),
             );
           }
         },
@@ -1889,6 +1935,43 @@ async function publishGitHubReleaseAsset(params: {
   }
 
   await reconcileGitHubPublication(params);
+}
+
+function isPermanentGitHubAuthorizationError(output: string): boolean {
+  // A secondary rate limit can be HTTP 403; it must retain transient retries.
+  if (/rate[\s-]*limit|secondary[\s-]*rate|\b429\b/i.test(output)) {
+    return false;
+  }
+  return (
+    /\bHTTP(?:\/[\d.]+)?[\s:(]*401\b/i.test(output) ||
+    /bad credentials|requires authentication|authentication failed/i.test(output) ||
+    /resource not accessible by (?:integration|personal access token)|insufficient (?:permissions|scope)/i.test(output) ||
+    /workflow[\s\S]*scope|scope[\s\S]*workflow/i.test(output)
+  );
+}
+
+async function reconcileGhMutationFailure<T>(
+  message: string,
+  reconcile: () => Promise<T>,
+): Promise<NonNullable<T>> {
+  try {
+    const matching = await reconcile();
+    if (matching) {
+      return matching;
+    }
+  } catch (error) {
+    if (error instanceof NonRetryableReleaseError) {
+      throw error;
+    }
+    if (isPermanentGitHubAuthorizationError(message)) {
+      throw new NonRetryableReleaseError(`${message}\nReconciliation failed: ${formatError(error)}`);
+    }
+    throw error;
+  }
+  if (isPermanentGitHubAuthorizationError(message)) {
+    throw new NonRetryableReleaseError(message);
+  }
+  throw new Error(message);
 }
 
 type GitHubReleaseAsset = {

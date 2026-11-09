@@ -53,8 +53,12 @@ Release contract:
 
 - Stable tags such as `v8.14.1`; draft and prerelease builds are ignored.
 - Assets named `vscode-unify-chat-provider-8.14.1.vsix` and `vscode-unify-chat-provider-8.14.1.vsix.sha256`. The checksum file contains `<64-digit SHA-256>  <VSIX filename>` followed by a newline.
-- The existing Release workflow now defaults to GitHub distribution with Marketplace publishing off and a draft release for review. Both assets are uploaded and reconciled before you publish the draft.
-- For the first updater release, create a `v8.14.1` tag containing this implementation and run the Release workflow with `mode=resume_from_tag`, `github_tag=v8.14.1`. Review the resulting assets, then publish the draft. Full mode bumps beyond the version currently in package.json and is suitable for subsequent releases.
+- Pushing a stable `vX.Y.Z` tag triggers the Release workflow. The tag must match package.json. CI runs checks and installed-version Extension Host tests, builds and verifies both assets, then publishes the completed Release automatically. Ordinary branch pushes do not publish; Marketplace publishing remains off for tag events.
+- Release notes are generated from commits since the previous reachable stable version tag through the target tag, grouped by change type. Notes use the tagged commit’s UTC date and remain deterministic on recovery runs; editing CHANGELOG.md is not required.
+- The workflow stages new releases privately as drafts while uploading and reconciling both assets, then automatically publishes them. Rerunning an already-published tag verifies the existing release without changing it back to a draft.
+- Existing tags created before the workflow gained tag triggers can be recovered once through `workflow_dispatch` on main with `mode=resume_from_tag`, the existing `github_tag`, and `draft=false`. The workflow preserves current release tooling before checking out that tag. Future version tags trigger automatically.
+
+For a normal patch release, commit your changes first, run `npm exec --yes --package=npm@10.8.2 -- npm version patch`, then push main and the newly created version tag. No Release page operation is required.
 
 Install the first updater-enabled VSIX manually. No Release is created by merely running or installing the extension.
 
