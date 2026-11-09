@@ -1118,7 +1118,7 @@ async function assertRemoteTagTarget(
 ): Promise<void> {
   const remoteTag = await getRemoteTagTarget(repoRoot, tagName);
   if (remoteTag !== expectedCommit) {
-    throw new Error(
+    throw new NonRetryableReleaseError(
       `Remote tag reconciliation failed for ${tagName}: expected=${expectedCommit}, origin=${remoteTag ?? '(missing)'}.`,
     );
   }
@@ -1419,12 +1419,7 @@ async function runFromTagMode(params: {
     throw new Error(`Git tag not found: ${tagName}`);
   }
 
-  const remoteTagCommit = await getRemoteTagTarget(params.repoRoot, tagName);
-  if (remoteTagCommit !== tagCommit) {
-    throw new Error(
-      `Tag reconciliation failed for ${tagName}: local=${tagCommit}, origin=${remoteTagCommit ?? '(missing)'}.`,
-    );
-  }
+  await assertRemoteTagTarget(params.repoRoot, tagName, tagCommit);
 
   const headCommit = (
     await runCapture(params.repoRoot, 'git', ['rev-parse', 'HEAD'])
@@ -1626,6 +1621,7 @@ function extractChangelogEntryForTag(
 async function publishGitHubRelease(
   params: Parameters<typeof publishGitHubReleaseAsset>[0],
 ): Promise<void> {
+  await assertRemoteTagTarget(params.repoRoot, params.tagName, params.targetCommitish);
   if (params.skipUpload) {
     await publishGitHubReleaseAsset(params);
     return;
@@ -1673,11 +1669,13 @@ async function publishGitHubReleaseAsset(params: {
     ...process.env,
     NO_COLOR: '1',
     TERM: 'dumb',
+    GH_REPO: await resolveGitHubRepoSlug(params.repoRoot),
   };
 
   let existingRelease = await getGitHubReleaseMetadataOrNull(
     params.repoRoot,
     params.tagName,
+    params.targetCommitish,
   );
   if (existingRelease) {
     if (params.mode === 'full') {
@@ -1685,7 +1683,8 @@ async function publishGitHubReleaseAsset(params: {
         `GitHub Release already exists for ${params.tagName}; full release collisions are fatal.`,
       );
     }
-    assertGitHubReleaseMatches({
+    await assertGitHubReleaseMatches({
+      repoRoot: params.repoRoot,
       metadata: existingRelease,
       tagName: params.tagName,
       targetCommitish: params.targetCommitish,
@@ -1721,8 +1720,8 @@ async function publishGitHubReleaseAsset(params: {
         params.title,
         '--notes-file',
         notesFile,
-        '--target',
-        params.targetCommitish,
+        // The tag is already pushed and verified; --target can require workflow scope.
+        '--verify-tag',
       ];
       if (params.draft) {
         args.push('--draft');
@@ -1731,6 +1730,7 @@ async function publishGitHubReleaseAsset(params: {
       await retry(
         GITHUB_MUTATION_ATTEMPTS,
         async () => {
+          await assertRemoteTagTarget(params.repoRoot, params.tagName, params.targetCommitish);
           const result = await runCaptureWithCode(params.repoRoot, 'gh', args, {
             env: ghEnv,
           });
@@ -1777,6 +1777,7 @@ async function publishGitHubReleaseAsset(params: {
       await retry(
         GITHUB_MUTATION_ATTEMPTS,
         async () => {
+          await assertRemoteTagTarget(params.repoRoot, params.tagName, params.targetCommitish);
           const result = await runCaptureWithCode(
             params.repoRoot,
             'gh',
@@ -1837,6 +1838,7 @@ async function publishGitHubReleaseAsset(params: {
     await retry(
       GITHUB_MUTATION_ATTEMPTS,
       async () => {
+        await assertRemoteTagTarget(params.repoRoot, params.tagName, params.targetCommitish);
         try {
           const release = await createGitHubRelease({
             repoSlug,
@@ -1899,6 +1901,7 @@ async function publishGitHubReleaseAsset(params: {
     await retry(
       GITHUB_MUTATION_ATTEMPTS,
       async () => {
+        await assertRemoteTagTarget(params.repoRoot, params.tagName, params.targetCommitish);
         try {
           await uploadGitHubReleaseAsset({
             uploadUrlTemplate: uploadUrl,
@@ -1999,7 +2002,12 @@ async function githubReleaseExists(
 async function getGitHubReleaseMetadataOrNull(
   repoRoot: string,
   tagName: string,
+  expectedCommit?: string,
 ): Promise<GitHubReleaseMetadata | null> {
+  if (expectedCommit !== undefined) {
+    await assertRemoteTagTarget(repoRoot, tagName, expectedCommit);
+  }
+  const repoSlug = await resolveGitHubRepoSlug(repoRoot);
   if (await canRun(repoRoot, 'gh', ['--version'])) {
     const result = await runCaptureWithCode(
       repoRoot,
@@ -2011,7 +2019,7 @@ async function getGitHubReleaseMetadataOrNull(
         '--json',
         'name,body,tagName,targetCommitish,isDraft,assets',
       ],
-      { env: { ...process.env, NO_COLOR: '1', TERM: 'dumb' } },
+      { env: { ...process.env, NO_COLOR: '1', TERM: 'dumb', GH_REPO: repoSlug } },
     );
     if (result.code !== 0) {
       const combined = `${result.stderr}\n${result.stdout}`.toLowerCase();
@@ -2034,10 +2042,6 @@ async function getGitHubReleaseMetadataOrNull(
     throw new Error(
       'GitHub release reconciliation requires gh or GITHUB_TOKEN.',
     );
-  }
-  const repoSlug = await resolveGitHubRepoSlug(repoRoot);
-  if (!repoSlug) {
-    throw new Error('Unable to determine GitHub repository (owner/repo).');
   }
   const url = `https://api.github.com/repos/${repoSlug}/releases/tags/${tagName}`;
   const response = await fetch(url, {
@@ -2119,7 +2123,8 @@ function parseGitHubReleaseMetadata(
   };
 }
 
-function assertGitHubReleaseMatches(params: {
+async function assertGitHubReleaseMatches(params: {
+  repoRoot: string;
   metadata: GitHubReleaseMetadata;
   tagName: string;
   targetCommitish: string;
@@ -2127,13 +2132,12 @@ function assertGitHubReleaseMatches(params: {
   notes: string;
   draft: boolean;
   checkPresentation: boolean;
-}): void {
-  if (
-    params.metadata.tagName !== params.tagName ||
-    params.metadata.targetCommitish !== params.targetCommitish
-  ) {
-    throw new Error(
-      `GitHub Release ${params.tagName} does not match the release tag: tag=${params.metadata.tagName}, target=${params.metadata.targetCommitish}, expected=${params.targetCommitish}.`,
+}): Promise<void> {
+  // targetCommitish is creation metadata (often a branch), not the tag's actual target.
+  await assertRemoteTagTarget(params.repoRoot, params.tagName, params.targetCommitish);
+  if (params.metadata.tagName !== params.tagName) {
+    throw new NonRetryableReleaseError(
+      `GitHub Release ${params.tagName} does not match the release tag: tag=${params.metadata.tagName}.`,
     );
   }
   if (!params.checkPresentation) {
@@ -2164,11 +2168,13 @@ async function getMatchingGitHubReleaseOrNull(params: {
   const metadata = await getGitHubReleaseMetadataOrNull(
     params.repoRoot,
     params.tagName,
+    params.targetCommitish,
   );
   if (!metadata) {
     return null;
   }
-  assertGitHubReleaseMatches({
+  await assertGitHubReleaseMatches({
+    repoRoot: params.repoRoot,
     metadata,
     tagName: params.tagName,
     targetCommitish: params.targetCommitish,
@@ -2263,13 +2269,15 @@ async function reconcileGitHubPublication(params: {
       const metadata = await getGitHubReleaseMetadataOrNull(
         params.repoRoot,
         params.tagName,
+        params.targetCommitish,
       );
       if (!metadata) {
         throw new Error(
           `GitHub Release ${params.tagName} is not visible yet.`,
         );
       }
-      assertGitHubReleaseMatches({
+      await assertGitHubReleaseMatches({
+        repoRoot: params.repoRoot,
         metadata,
         tagName: params.tagName,
         targetCommitish: params.targetCommitish,
@@ -2300,26 +2308,29 @@ async function reconcileGitHubPublication(params: {
   console.log(`GitHub Release publication verified: ${params.tagName}.`);
 }
 
-async function resolveGitHubRepoSlug(repoRoot: string): Promise<string | null> {
-  const pkgPath = join(repoRoot, 'package.json');
-  try {
-    const pkgText = await readTextFile(pkgPath);
-    const pkgJson = parseJsonObject(pkgText, pkgPath);
-    const repoField = pkgJson.repository;
-    const slugFromPkg = extractGitHubSlugFromRepository(repoField);
-    if (slugFromPkg) return slugFromPkg;
-  } catch {
-    // ignore and fallback to git remote
+async function resolveGitHubRepoSlug(repoRoot: string): Promise<string> {
+  const origin = (
+    await runCapture(repoRoot, 'git', ['remote', 'get-url', 'origin'])
+  ).stdout.trim();
+  const repoSlug = parseGitHubSlug(origin);
+  if (!repoSlug) {
+    throw new NonRetryableReleaseError('Origin must identify a GitHub repository (owner/repo).');
   }
 
-  try {
-    const origin = (
-      await runCapture(repoRoot, 'git', ['remote', 'get-url', 'origin'])
-    ).stdout.trim();
-    return parseGitHubSlug(origin);
-  } catch {
-    return null;
+  const pkgPath = join(repoRoot, 'package.json');
+  const pkgJson = parseJsonObject(await readTextFile(pkgPath), pkgPath);
+  const packageSlug = extractGitHubSlugFromRepository(pkgJson.repository);
+  const configuredRepo = process.env.GH_REPO;
+  const configuredSlug = configuredRepo
+    ? parseGitHubSlug(configuredRepo) ?? (/^[^/]+\/[^/]+$/.test(configuredRepo) ? configuredRepo : null)
+    : null;
+  if (
+    (packageSlug && packageSlug.toLowerCase() !== repoSlug.toLowerCase()) ||
+    (configuredRepo && configuredSlug?.toLowerCase() !== repoSlug.toLowerCase())
+  ) {
+    throw new NonRetryableReleaseError('GitHub repository mismatch: package repository and GH_REPO must match origin.');
   }
+  return repoSlug;
 }
 
 function extractGitHubSlugFromRepository(value: unknown): string | null {

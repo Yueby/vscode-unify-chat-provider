@@ -24,6 +24,7 @@ type TestRepository = {
 type ToolCall = {
   tool: string;
   args: string[];
+  repo?: string;
 };
 
 const releaseScript = resolve(process.cwd(), 'scripts/release.mts');
@@ -137,7 +138,10 @@ describe('release script coordination', () => {
 
       const calls = await readToolCalls(callLog);
       expect(calls.some((call) => call.tool === 'vsce' && call.args[0] === 'publish')).toBe(true);
-      expect(calls.some((call) => call.tool === 'gh' && call.args[1] === 'create')).toBe(true);
+      const create = calls.find((call) => call.tool === 'gh' && call.args[1] === 'create');
+      expect(create?.args).toContain('--verify-tag');
+      expect(create?.args).not.toContain('--target');
+      expect(create?.repo).toBe('TestPublisher/test-extension');
       const assetPath = join(repository.release, 'test-extension-1.1.0.vsix');
       expect(calls.filter((call) => call.tool === 'gh' && call.args[1] === 'upload')
         .map((call) => call.args[3])).toEqual([assetPath, `${assetPath}.sha256`]);
@@ -250,7 +254,8 @@ describe('automatic GitHub release notes', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('auto (v1.0.5..v1.1.0)');
     const state = JSON.parse(await readFile(fixture.githubState, 'utf8'));
-    expect(state).toMatchObject({ targetCommitish: target, isDraft: false });
+    expect(state).toMatchObject({ targetCommitish: 'main', isDraft: false });
+    expect(runOk('git', ['ls-remote', 'origin', 'refs/tags/v1.1.0^{}'], cwd).stdout.trim().split('\t')[0]).toBe(target);
     expect(state.body).toContain('## v1.1.0 (2026-01-02)');
     expect(state.body).toContain('### Features\n- chat: tagged feature');
     expect(state.body).toContain('### Fixes\n- tagged repair');
@@ -345,6 +350,99 @@ describe('automatic GitHub release notes', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('CHANGELOG.md (v1.0.0)');
     expect(JSON.parse(await readFile(fixture.githubState, 'utf8')).body).toBe('## v1.0.0 (2026-01-01)\n\n- Initial.\n');
+  }, 60_000);
+});
+
+describe('GitHub release tag boundaries', () => {
+  it('creates from the existing tag without --target and pins every CLI repository to origin', async () => {
+    const fixture = await createGitHubFixture();
+    const result = runRelease(fixture.repository.release, fixture.args, fixture.env);
+    expect(result.status).toBe(0);
+    const calls = await readToolCalls(fixture.callLog);
+    const create = gitHubMutations(calls).find((call) => call.args[1] === 'create');
+    expect(create?.args).toContain('--verify-tag');
+    expect(create?.args).not.toContain('--target');
+    expect(calls.filter((call) => call.tool === 'gh' && call.args[0] === 'release')
+      .every((call) => call.repo === 'TestPublisher/test-extension')).toBe(true);
+    expect(JSON.parse(await readFile(fixture.githubState, 'utf8')).targetCommitish).toBe('main');
+    const resumed = runRelease(fixture.repository.release, fixture.args, fixture.env);
+    expect(resumed.status).toBe(0);
+    expect(gitHubMutations(await readToolCalls(fixture.callLog))).toHaveLength(3);
+  }, 60_000);
+
+  const stages = [
+    { name: 'from-tag entry', check: 1 },
+    { name: 'publish entry', check: 2 },
+    { name: 'initial existing release', check: 4, existing: true },
+    { name: 'before create', check: 4 },
+    { name: 'before create retry', check: 6, failure: 'create' },
+    { name: 'before upload', check: 5, existing: true },
+    { name: 'before upload retry', check: 8, existing: true, failure: 'upload' },
+    { name: 'getMatching lookup', check: 5, failure: 'create' },
+    { name: 'getMatching assertion', check: 6, failure: 'create', afterWrite: true },
+    { name: 'publication lookup', check: 5, skipUpload: true },
+    { name: 'publication assertion', check: 6, skipUpload: true },
+  ];
+  it.each(stages.flatMap((stage) => ['missing', 'moved'].map((change) => ({ ...stage, change }))))(
+    'fails non-retryably for a $change remote tag at $name', async (stage) => {
+      const fixture = await createGitHubFixture();
+      if (stage.existing) await writeGitHubState(fixture, [], 'main');
+      const movedTarget = stage.change === 'moved' ? runOk('git', [
+        '-c', 'user.name=Release Test', '-c', 'user.email=release-test@example.com',
+        '--git-dir', fixture.repository.origin, 'commit-tree', 'main^{tree}', '-p', 'main', '-m', 'moved fixture',
+      ], fixture.repository.release).stdout.trim() : undefined;
+      const result = runRelease(fixture.repository.release, [
+        ...fixture.args, ...(stage.skipUpload ? ['--skip-github-upload'] : []),
+      ], {
+        ...fixture.env,
+        RELEASE_TEST_CHANGE_TAG_AT_CHECK: String(stage.check),
+        RELEASE_TEST_MOVED_TAG_TARGET: movedTarget,
+        RELEASE_TEST_GITHUB_FAIL_OPERATION: stage.failure,
+        RELEASE_TEST_GITHUB_FAILURE_OUTPUT: 'HTTP 503: temporary failure',
+        RELEASE_TEST_GITHUB_ERROR_AFTER_WRITE: stage.afterWrite ? 'true' : undefined,
+        RELEASE_TEST_FAST_RETRIES: 'true',
+      });
+      const output = `${result.stderr}\n${result.stdout}`;
+      expect(result.status).not.toBe(0);
+      expect(output).toContain('NonRetryableReleaseError');
+      expect(output).toContain('Remote tag reconciliation failed');
+      expect(output).toContain(stage.change === 'missing' ? 'origin=(missing)' : `origin=${movedTarget}`);
+      expect(output).not.toContain('attempt 2/');
+      const mutations = await readToolCalls(fixture.callLog).catch(() => []);
+      expect(gitHubMutations(mutations)).toHaveLength(stage.failure || stage.skipUpload ? 1 : 0);
+    }, 60_000,
+  );
+
+  it.each(['GH_REPO', 'package repository', 'origin'])('rejects a mismatched %s before GitHub mutations', async (source) => {
+    const fixture = await createGitHubFixture();
+    if (source === 'package repository') {
+      const path = join(fixture.repository.release, 'package.json');
+      const pkg = JSON.parse(await readFile(path, 'utf8'));
+      await writeFile(path, JSON.stringify({ ...pkg, repository: 'github:Upstream/other' }));
+    }
+    const result = runRelease(fixture.repository.release, fixture.args, {
+      ...fixture.env,
+      GH_REPO: source === 'GH_REPO' ? 'Upstream/other' : undefined,
+      RELEASE_TEST_ORIGIN_URL: source === 'origin' ? fixture.repository.origin : undefined,
+    });
+    expect(result.status).not.toBe(0);
+    expect(`${result.stderr}\n${result.stdout}`).toContain('NonRetryableReleaseError');
+    expect(`${result.stderr}\n${result.stdout}`).toContain(source === 'origin' ? 'Origin must identify' : 'repository mismatch');
+    expect(gitHubMutations(await readToolCalls(fixture.callLog).catch(() => []))).toEqual([]);
+  }, 60_000);
+
+  it.each(['tagName', 'name', 'body', 'isDraft'])('preserves the existing release %s assertion', async (field) => {
+    const fixture = await createGitHubFixture();
+    await writeGitHubState(fixture, [], 'main');
+    const state = JSON.parse(await readFile(fixture.githubState, 'utf8'));
+    state[field] = field === 'isDraft' ? false : 'different';
+    await writeFile(fixture.githubState, JSON.stringify(state));
+    const result = runRelease(fixture.repository.release, fixture.args, {
+      ...fixture.env, RELEASE_TEST_FAST_RETRIES: 'true',
+    });
+    expect(result.status).not.toBe(0);
+    expect(`${result.stderr}\n${result.stdout}`).toContain(field === 'tagName' ? 'does not match the release tag' : 'different title, notes, or draft');
+    expect(gitHubMutations(await readToolCalls(fixture.callLog))).toEqual([]);
   }, 60_000);
 });
 
@@ -502,13 +600,13 @@ describe('GitHub release checksums', () => {
     expect(gitHubMutations(await readToolCalls(fixture.callLog))).toEqual([]);
   }, 60_000);
 
-  it('keeps tag target validation when creation is skipped', async () => {
+  it('reconciles branch-valued creation metadata against the actual remote tag when creation is skipped', async () => {
     const fixture = await createGitHubFixture();
-    await writeGitHubState(fixture, [], 'wrong-target');
+    await writeGitHubState(fixture, [], 'main');
     const result = runRelease(fixture.repository.release, [...fixture.args, '--skip-github-create'], fixture.env);
-    expect(result.status).not.toBe(0);
-    expect(`${result.stderr}\n${result.stdout}`).toContain('target');
-    expect(gitHubMutations(await readToolCalls(fixture.callLog))).toEqual([]);
+    expect(result.status).toBe(0);
+    expect(gitHubMutations(await readToolCalls(fixture.callLog)).map((call) => call.args[1])).toEqual(['upload', 'upload']);
+    expect(runOk('git', ['ls-remote', 'origin', 'refs/tags/v1.0.0^{}'], fixture.repository.release).stdout.trim().split('\t')[0]).toBe(fixture.targetCommitish);
   }, 60_000);
 
   it('requires an existing release when creation is skipped', async () => {
@@ -772,7 +870,7 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const path = require('node:path');
 const args = process.argv.slice(2);
-fs.appendFileSync(process.env.RELEASE_TEST_CALL_LOG, JSON.stringify({ tool: 'gh', args }) + '\\n');
+fs.appendFileSync(process.env.RELEASE_TEST_CALL_LOG, JSON.stringify({ tool: 'gh', args, repo: process.env.GH_REPO }) + '\\n');
 if (args[0] === '--version') {
   process.stdout.write('gh version test\\n');
   process.exit(0);
@@ -806,7 +904,7 @@ if (args[0] === 'release' && args[1] === 'create') {
     const valueAfter = (name) => args[args.indexOf(name) + 1];
     fs.writeFileSync(state, JSON.stringify({
       tagName: args[2],
-      targetCommitish: valueAfter('--target'),
+      targetCommitish: args.includes('--target') ? valueAfter('--target') : 'main',
       name: valueAfter('--title'),
       body: fs.readFileSync(valueAfter('--notes-file'), 'utf8'),
       isDraft: args.includes('--draft'),
@@ -861,7 +959,23 @@ if (process.env.RELEASE_TEST_NOW) {
   };
 }
 const spawn = childProcess.spawn;
+let tagChecks = 0;
 childProcess.spawn = (command, args, options) => {
+  // Keep all refs local while presenting a GitHub origin to repository selection.
+  if (command === 'git' && args.join(' ') === 'remote get-url origin') {
+    const origin = process.env.RELEASE_TEST_ORIGIN_URL || 'https://github.com/TestPublisher/test-extension.git';
+    return spawn(process.execPath, ['-e', 'process.stdout.write(process.argv[1])', origin], options);
+  }
+  if (command === 'git' && args[0] === 'ls-remote' && args[2]?.startsWith('refs/tags/')) {
+    tagChecks++;
+    if (tagChecks === Number(process.env.RELEASE_TEST_CHANGE_TAG_AT_CHECK)) {
+      const origin = fileURLToPath(new URL('../origin.git', import.meta.url));
+      const target = process.env.RELEASE_TEST_MOVED_TAG_TARGET;
+      const update = target ? [args[2], target] : ['-d', args[2]];
+      const result = childProcess.spawnSync('git', ['--git-dir', origin, 'update-ref', ...update], { encoding: 'utf8' });
+      if (result.status !== 0) throw new Error(result.stderr);
+    }
+  }
   if (command === 'gh' || command === 'vsce') {
     return spawn(process.execPath, [fileURLToPath(new URL(command, import.meta.url)), ...args], options);
   }
@@ -928,6 +1042,6 @@ async function readToolCalls(path: string): Promise<ToolCall[]> {
       ) {
         throw new Error(`Invalid tool call log entry: ${line}`);
       }
-      return { tool: value.tool, args: value.args };
+      return { tool: value.tool, args: value.args, repo: 'repo' in value && typeof value.repo === 'string' ? value.repo : undefined };
     });
 }
