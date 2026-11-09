@@ -415,7 +415,16 @@ export class CompletionManager
     };
   }
 
-  getRuntimeDebugState(providerId: string): unknown {
+  getRuntimeDebugState(
+    providerId: string,
+    item?: vscode.InlineCompletionItem,
+  ): unknown {
+    if (item) {
+      const route = this.itemSources.get(item);
+      return route?.providerId === providerId
+        ? route.entry.algorithm.getDebugState?.(item)
+        : undefined;
+    }
     return this.runtimes.get(providerId)?.algorithm.getDebugState?.();
   }
 

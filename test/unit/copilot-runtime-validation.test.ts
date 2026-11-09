@@ -29,6 +29,7 @@ interface FakeEngineRecord {
   endCount: number;
   listEndCount: number;
   shownCount: number;
+  lastShownItemIds: string[];
   cyclingCandidateCount?: number;
 }
 
@@ -230,6 +231,7 @@ vi.mock("../../src/chat-lib/core/ghost-text", () => ({
       endCount: 0,
       listEndCount: 0,
       shownCount: 0,
+      lastShownItemIds: [],
       cyclingCandidateCount: options?.behavior?.cyclingCandidateCount,
     };
     state.engines.push(record);
@@ -271,17 +273,24 @@ vi.mock("../../src/chat-lib/core/ghost-text", () => ({
           },
         };
       },
-      handleDidShowCompletionItem() {
+      handleDidShowCompletionItem(itemId: string) {
         record.shownCount += 1;
+        record.lastShownItemIds.push(itemId);
       },
-      handleEndOfLifetime() {
+      handleEndOfLifetime(_itemId: string, reason: string) {
         record.endCount += 1;
+        if (reason === "accepted") {
+          record.lastShownItemIds = [];
+        }
       },
       handleListEndOfLifetime() {
         record.listEndCount += 1;
       },
       getDebugState() {
-        return { cacheEntries: 0 };
+        return {
+          cacheEntries: 0,
+          lastShownItemIds: [...record.lastShownItemIds],
+        };
       },
       dispose() {
         record.disposed = true;
@@ -655,6 +664,92 @@ describe("CopilotRuntime behavior config startup validation", () => {
     expect(state.engines[0].disposed).toBe(true);
     runtime.dispose();
   });
+
+  it.each(["item-first", "list-first"] as const)(
+    "observes the item-owning FIM engine after a catalog change until %s cleanup",
+    async (cleanupOrder) => {
+      state.engines.length = 0;
+      const model = new ControlledCompletionModel();
+      const context: CompletionAlgorithmContext = {
+        entry: { id: "copilot-fim", algorithm: "copilot-replica" },
+        options: {},
+        modelResolver: {
+          async resolveCompletionModel() {
+            return model;
+          },
+        },
+        reportConfigurationError() {},
+      };
+      const runtime = new CopilotRuntime(context, {
+        enableFIM: true,
+        enableNES: false,
+        n: 1,
+        fimModel: { vendor: "test", id: "controlled" },
+      });
+      const result = await runtime.provideInlineCompletions(
+        completionInput(),
+        cancellationToken(),
+      );
+      expect(result?.items).toHaveLength(1);
+      const item = result?.items[0];
+      if (!item) {
+        throw new Error("Expected the FIM item before the catalog change.");
+      }
+      const list = new vscode.InlineCompletionList([item]);
+      runtime.trackCompletionList(list, [item]);
+      const originalEngine = state.engines[0];
+
+      runtime.handleDidChangeChatModels();
+      expect(runtime.getState().fim).toBeUndefined();
+      expect(runtime.getDebugState()).toEqual(runtime.getState());
+      expect(runtime.getDebugState(item).fim?.lastShownItemIds).toEqual([]);
+      expect(originalEngine.disposed).toBe(false);
+
+      runtime.handleDidShowCompletionItem(item, "completion");
+      expect(originalEngine.shownCount).toBe(1);
+      expect(runtime.getState().fim).toBeUndefined();
+      expect(runtime.getDebugState(item).fim?.lastShownItemIds).toEqual([
+        "item-1",
+      ]);
+      expect(originalEngine.disposed).toBe(false);
+
+      const next = await runtime.provideInlineCompletions(
+        completionInput(),
+        cancellationToken(),
+      );
+      expect(next?.items).toHaveLength(1);
+      expect(state.engines).toHaveLength(2);
+      expect(state.engines[1].shownCount).toBe(0);
+      expect(runtime.getDebugState().fim?.lastShownItemIds).toEqual([]);
+      expect(runtime.getDebugState(item).fim?.lastShownItemIds).toHaveLength(1);
+      expect(
+        runtime.getDebugState(new vscode.InlineCompletionItem("unrouted")).fim,
+      ).toBeUndefined();
+
+      const endItem = () => runtime.handleEndOfLifetime(item, {
+        kind: vscode.InlineCompletionEndOfLifeReasonKind.Accepted,
+      });
+      const endList = () => runtime.handleListEndOfLifetime(list, {
+        kind: vscode.InlineCompletionsDisposeReasonKind.Other,
+      });
+      if (cleanupOrder === "item-first") {
+        endItem();
+        expect(originalEngine.disposed).toBe(false);
+        endList();
+      } else {
+        endList();
+        expect(originalEngine.disposed).toBe(false);
+        expect(runtime.getDebugState(item).fim?.lastShownItemIds).toHaveLength(1);
+        endItem();
+      }
+      expect(originalEngine.endCount).toBe(1);
+      expect(originalEngine.listEndCount).toBe(1);
+      expect(originalEngine.disposed).toBe(true);
+      expect(runtime.getDebugState(item).fim).toBeUndefined();
+      expect(runtime.getDebugState().fim).toBeDefined();
+      runtime.dispose();
+    },
+  );
 
   it("disposes a retired FIM engine when its pending caller is cancelled", async () => {
     state.engines.length = 0;

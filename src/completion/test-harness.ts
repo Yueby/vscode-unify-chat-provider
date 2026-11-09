@@ -389,6 +389,28 @@ export class CompletionTestHarness implements vscode.Disposable {
     return true;
   }
 
+  getRuntimeDebugState(
+    providerId: string,
+    sessionId?: unknown,
+    itemIndex: unknown = 0,
+  ): unknown {
+    if (sessionId === undefined) {
+      return this.manager.getRuntimeDebugState(providerId);
+    }
+    if (
+      typeof sessionId !== "number" ||
+      !Number.isInteger(sessionId) ||
+      typeof itemIndex !== "number" ||
+      !Number.isInteger(itemIndex)
+    ) {
+      return undefined;
+    }
+    const item = this.sessions.get(sessionId)?.items[itemIndex];
+    return item
+      ? this.manager.getRuntimeDebugState(providerId, item)
+      : undefined;
+  }
+
   dispatchLifecycle(rawEvent: unknown): boolean {
     if (!isRecord(rawEvent)) {
       return false;

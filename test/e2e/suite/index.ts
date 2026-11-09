@@ -355,10 +355,14 @@ async function provideDetailed(
 
 async function getRuntimeState(
   providerId: string,
+  sessionId?: number,
+  itemIndex?: number,
 ): Promise<CopilotRuntimeDebugState | undefined> {
   return vscode.commands.executeCommand<CopilotRuntimeDebugState | undefined>(
     "unifyChatProvider.completion.test.getRuntimeState",
     providerId,
+    sessionId,
+    itemIndex,
   );
 }
 
@@ -630,12 +634,38 @@ async function waitForNesCacheSize(
 async function setFakeLanguageModelRegistered(
   registered: boolean,
 ): Promise<void> {
-  const updated = await vscode.commands.executeCommand<boolean>(
-    "ucpE2E.fakeLanguageModel.setRegistered",
-    registered,
-  );
-  assert.equal(updated, true);
-  await delay(40);
+  let catalogVersion = 0;
+  let wake: (() => void) | undefined;
+  let timedOut = false;
+  const timeout = setTimeout(() => { timedOut = true; wake?.(); }, 5000);
+  const subscription = vscode.lm.onDidChangeChatModels(() => {
+    catalogVersion += 1;
+    wake?.();
+  });
+  try {
+    const beforeRegistered = (await vscode.lm.selectChatModels(FAKE_NES_MODEL)).length > 0;
+    const updated = await vscode.commands.executeCommand<boolean>(
+      "ucpE2E.fakeLanguageModel.setRegistered",
+      registered,
+    );
+    assert.equal(updated, true);
+    while (true) {
+      const version = catalogVersion;
+      const models = await vscode.lm.selectChatModels(FAKE_NES_MODEL);
+      if ((models.length > 0) === registered && (beforeRegistered === registered || catalogVersion > 0)) {
+        return;
+      }
+      assert.equal(timedOut, false, `Timed out waiting for the fake model catalog to become ${registered ? 'registered' : 'unregistered'}`);
+      if (version === catalogVersion) {
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+      }
+    }
+  } finally {
+    clearTimeout(timeout);
+    subscription.dispose();
+  }
 }
 
 async function openScenarioDocument(
@@ -2481,12 +2511,14 @@ async function runCopilotCompletionE2E(
     "export const accepted = true;",
   );
   const acceptedSession = await provideDetailed();
+  assert.equal(acceptedSession.items.length, 1);
   await dispatchLifecycle({
     action: "show",
     sessionId: acceptedSession.sessionId,
   });
   assert.equal(
-    (await getRuntimeState("lifecycle-fim"))?.fim?.lastShownItemIds.length,
+    (await getRuntimeState("lifecycle-fim", acceptedSession.sessionId))?.fim
+      ?.lastShownItemIds.length,
     1,
   );
   await dispatchLifecycle({

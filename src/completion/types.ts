@@ -173,7 +173,7 @@ export interface CompletionAlgorithm {
     reason: CompletionDiscardReason,
   ): void;
   updateOptions?(normalizedOptions: unknown): boolean;
-  getDebugState?(): unknown;
+  getDebugState?(item?: vscode.InlineCompletionItem): unknown;
   dispose?(): void;
 }
 

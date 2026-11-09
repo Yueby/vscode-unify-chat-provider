@@ -564,9 +564,13 @@ export async function activate(
         ),
         vscode.commands.registerCommand(
           'unifyChatProvider.completion.test.getRuntimeState',
-          (providerId: unknown) =>
+          (providerId: unknown, sessionId?: unknown, itemIndex?: unknown) =>
             typeof providerId === 'string'
-              ? completionManager.getRuntimeDebugState(providerId)
+              ? completionTestHarness.getRuntimeDebugState(
+                  providerId,
+                  sessionId,
+                  itemIndex,
+                )
               : undefined,
         ),
         vscode.commands.registerCommand(

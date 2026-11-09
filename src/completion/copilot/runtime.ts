@@ -564,8 +564,17 @@ export class CopilotRuntime implements CompletionAlgorithm {
     };
   }
 
-  getDebugState(): ReturnType<CopilotRuntime["getState"]> {
-    return this.getState();
+  getDebugState(
+    item?: vscode.InlineCompletionItem,
+  ): ReturnType<CopilotRuntime["getState"]> {
+    if (!item) {
+      return this.getState();
+    }
+    const route = this.itemRoutes.get(item);
+    return {
+      ...this.getState(),
+      fim: route?.branch === "fim" ? route.engine.getDebugState() : undefined,
+    };
   }
 
   handleDidChangeChatModels(): void {
